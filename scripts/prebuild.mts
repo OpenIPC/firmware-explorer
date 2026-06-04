@@ -46,6 +46,8 @@ export const REPOS: Record<Source, string> = {
 
 export const TAG_RE = /^nightly-\d{8}-[0-9a-f]{7}$/;
 export const SIZES_RE = /^sizes\.(.+)\.json$/;
+export const KCONFIG_GRAPH_RE = /^kconfig-graph\.(.+)\.json$/;
+export const KCONFIG_HELP_RE = /^kconfig-help\.(.+)\.json$/;
 
 export type GhRelease = {
   tagName: string;
@@ -76,6 +78,12 @@ export type IndexFile = {
   generated_at: string;
   retention: number;
   builds: BuildEntry[];
+  // v0.3 addition: which platforms have kconfig-graph data available under
+  // ./data/<source>/kconfig/. Per-source (not per-build) — the configurator
+  // ships the latest graph snapshot only, because Kconfig dep relations
+  // evolve too slowly for per-build to be worth the storage hit.
+  // Older clients ignore this field (forward-compatible).
+  kconfig_available_for?: string[];
 };
 
 // Hookable shell-out + filesystem so unit tests can inject mocks without
@@ -124,6 +132,11 @@ export function parseBody(body: string): {
 
 export function platformFromAssetName(name: string): string | null {
   const m = SIZES_RE.exec(name);
+  return m ? m[1] : null;
+}
+
+export function platformFromKconfigGraphName(name: string): string | null {
+  const m = KCONFIG_GRAPH_RE.exec(name);
   return m ? m[1] : null;
 }
 
@@ -268,12 +281,32 @@ export async function runPrebuild(opts: RunOpts): Promise<{
     // Sort newest first for the index (matches manifest.json convention).
     builds.sort((a, b) => b.built_at.localeCompare(a.built_at));
 
+    // v0.3: pull Kconfig graph from the newest tag only. The graph evolves
+    // slowly relative to nightly cadence; per-build kconfig storage was
+    // measured at ~3 GB raw across the retention window for negligible UX
+    // gain. The newest snapshot is good enough for "what can I disable on
+    // this board?". Help text ships per-platform alongside (small).
+    const kconfigAvailableFor = await downloadKconfig({
+      builds,
+      source,
+      repo,
+      sourceOut,
+      cacheDir,
+      forceRefetch,
+      gh,
+      fs,
+      log,
+    });
+
     const index: IndexFile = {
       schema: 1,
       source,
       generated_at: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
       retention,
       builds,
+      ...(kconfigAvailableFor.length > 0
+        ? { kconfig_available_for: kconfigAvailableFor }
+        : {}),
     };
     fs.write(join(sourceOut, "index.json"), JSON.stringify(index, null, 2) + "\n");
 
@@ -282,6 +315,79 @@ export async function runPrebuild(opts: RunOpts): Promise<{
   }
 
   return { builds: out };
+}
+
+/**
+ * Walk the build list newest-first and download Kconfig assets from the first
+ * tag that has them. Files land at:
+ *   <sourceOut>/kconfig/<platform>.json          (graph, what user can toggle)
+ *   <sourceOut>/kconfig/<platform>.help.json     (per-symbol help, lazy-load)
+ * Returns the platform-name list for the index's `kconfig_available_for`.
+ */
+async function downloadKconfig(args: {
+  builds: BuildEntry[];
+  source: Source;
+  repo: string;
+  sourceOut: string;
+  cacheDir: string;
+  forceRefetch: boolean;
+  gh: GhFn;
+  fs: FsHooks;
+  log: (msg: string) => void;
+}): Promise<string[]> {
+  const { builds, source, repo, sourceOut, cacheDir, forceRefetch, gh, fs, log } = args;
+  const kconfigOut = join(sourceOut, "kconfig");
+
+  for (const build of builds) {
+    const tag = build.id;
+    const kcCache = join(cacheDir, source, tag, "kconfig");
+
+    const cached =
+      !forceRefetch &&
+      fs.exists(kcCache) &&
+      fs.listDir(kcCache).some((n) => KCONFIG_GRAPH_RE.test(n));
+
+    if (!cached) {
+      fs.rmDir(kcCache);
+      fs.mkdir(kcCache);
+      try {
+        gh([
+          "release",
+          "download",
+          tag,
+          "--repo",
+          repo,
+          "--pattern",
+          "kconfig-*.json",
+          "--dir",
+          kcCache,
+          "--skip-existing",
+        ]);
+      } catch {
+        // No kconfig assets on this tag — try the next one.
+        continue;
+      }
+    }
+
+    const graphs = fs.listDir(kcCache).filter((n) => KCONFIG_GRAPH_RE.test(n));
+    if (graphs.length === 0) continue;
+
+    // Copy verbatim — the explorer fetches by the original
+    // kconfig-graph.<plat>.json / kconfig-help.<plat>.json filenames.
+    fs.rmDir(kconfigOut);
+    fs.mkdir(kconfigOut);
+    fs.copyDir(kcCache, kconfigOut);
+
+    const platforms = graphs
+      .map(platformFromKconfigGraphName)
+      .filter((p): p is string => p !== null)
+      .sort();
+    log(`[${source}] kconfig from ${tag}: ${platforms.length} platforms`);
+    return platforms;
+  }
+
+  log(`[${source}] no kconfig assets found in any retained tag`);
+  return [];
 }
 
 // --- CLI entrypoint ---------------------------------------------------------

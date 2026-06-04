@@ -24,6 +24,40 @@ export type IndexFile = {
   generated_at: string;
   retention: number;
   builds: Build[];
+  // v0.3 (forward-compatible): which platforms have kconfig-graph data
+  // available under ./data/<source>/kconfig/. Absent in v0.2-era files.
+  kconfig_available_for?: string[];
+};
+
+// v0.3: the emitted kconfig-graph.<plat>.json schema. Matches the layout
+// general/scripts/kconfig_graph.py produces.
+export type KconfigSymbol = {
+  package: string | null;
+  type: "bool" | "tristate" | "string" | "int" | "hex" | string;
+  prompt: string | null;
+  depends_on: string[];
+  selects: string[];
+  // Filtered to currently-set selectors only — direct hard-pin sources.
+  selected_by: string[];
+  direct_dep_expr: string;
+};
+
+export type KconfigGraph = {
+  schema: number;
+  board: string;
+  variant: string;
+  br_ver: string;
+  symbol_prefix: string;
+  symbol_count: number;
+  skipped_no_node: number;
+  symbols: Record<string, KconfigSymbol>;
+};
+
+export type KconfigHelp = {
+  schema: number;
+  board: string;
+  variant: string;
+  help: Record<string, string>;
 };
 
 export type SizesPackage = {

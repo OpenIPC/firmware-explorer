@@ -43,6 +43,8 @@ describe.skipIf(skip)("dist/ bundle invariants", () => {
       expect(content).not.toMatch(/release-assets\.githubusercontent\.com/);
       expect(content).not.toMatch(/api\.github\.com\/repos\/.+\/releases\/assets/);
       expect(content).not.toMatch(/releases\/download\/[^"'`]+\.json/);
+      // v0.3 invariant: kconfig graph + help URLs must also stay same-origin.
+      expect(content).not.toMatch(/releases\/download\/[^"'`]+kconfig[^"'`]+/);
     },
   );
 
