@@ -5,8 +5,6 @@ import { categorise, CATEGORY_COLOUR, CATEGORY_LABEL } from "../lib/categorise";
 
 type Props = {
   packages: SizesPackage[];
-  selected: Set<string>;
-  onToggle: (name: string) => void;
   width?: number;
   height?: number;
 };
@@ -19,8 +17,6 @@ type Leaf = {
 
 export function PackageTreemap({
   packages,
-  selected,
-  onToggle,
   width = 960,
   height = 480,
 }: Props) {
@@ -48,7 +44,6 @@ export function PackageTreemap({
     }>;
   }, [packages, width, height]);
 
-  // Legend = unique categories present in the data.
   const categoriesPresent = useMemo(() => {
     const s = new Set<ReturnType<typeof categorise>>();
     for (const p of packages) s.add(categorise(p.name));
@@ -67,13 +62,11 @@ export function PackageTreemap({
           const h = d.y1 - d.y0;
           const showLabel = w > 60 && h > 22;
           const showSize = w > 80 && h > 38;
-          const isSelected = selected.has(d.data.name);
           return (
             <g
               key={d.data.name}
               transform={`translate(${d.x0},${d.y0})`}
-              className={`treemap-cell${isSelected ? " treemap-selected" : ""}`}
-              onClick={() => onToggle(d.data.name)}
+              className="treemap-cell"
             >
               <title>
                 {d.data.name} ({CATEGORY_LABEL[d.data.category]}){"\n"}
@@ -83,7 +76,7 @@ export function PackageTreemap({
                 width={w}
                 height={h}
                 fill={CATEGORY_COLOUR[d.data.category]}
-                opacity={isSelected ? 0.4 : 0.85}
+                opacity={0.85}
               />
               {showLabel && (
                 <text x={4} y={14} className="treemap-label">
@@ -109,7 +102,6 @@ export function PackageTreemap({
             {CATEGORY_LABEL[c]}
           </span>
         ))}
-        <span className="muted">click a cell to toggle what-if disable</span>
       </div>
     </div>
   );

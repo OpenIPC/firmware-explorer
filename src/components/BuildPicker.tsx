@@ -1,20 +1,13 @@
-import type { Manifest } from "../lib/types";
+import type { IndexFile } from "../lib/types";
 
 type Props = {
-  manifest: Manifest;
+  index: IndexFile;
   value: string | null;
   onChange: (id: string) => void;
   label?: string;
 };
 
-export function BuildPicker({ manifest, value, onChange, label = "Build" }: Props) {
-  const channelLabel = (id: string): string => {
-    const ch = Object.entries(manifest.channels)
-      .filter(([, v]) => v === id)
-      .map(([k]) => k);
-    return ch.length ? ` [${ch.join(", ")}]` : "";
-  };
-
+export function BuildPicker({ index, value, onChange, label = "Build" }: Props) {
   return (
     <label className="picker">
       <span className="picker-label">{label}</span>
@@ -25,10 +18,9 @@ export function BuildPicker({ manifest, value, onChange, label = "Build" }: Prop
         <option value="" disabled>
           — pick a build —
         </option>
-        {manifest.builds.map((b) => (
+        {index.builds.map((b) => (
           <option key={b.id} value={b.id}>
-            {b.id}
-            {channelLabel(b.id)} — {b.built_at}
+            {b.id} — {b.built_at}
           </option>
         ))}
       </select>

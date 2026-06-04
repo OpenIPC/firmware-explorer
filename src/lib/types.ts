@@ -1,33 +1,28 @@
-// Matches the JSON schemas emitted by:
-//   firmware: .github/scripts/enrich_manifest.py + general/scripts/size_report.py (PR #2166)
-//   builder:  .github/scripts/enrich_manifest.py + downstream firmware (PR #102)
+// Types are shared with `scripts/prebuild.mts`. The aggregator writes:
+//
+//   public/data/<source>/index.json       <- IndexFile
+//   public/data/<source>/<id>/<plat>.json <- Sizes (verbatim copy of size_report.py output)
+//
+// Vite copies `public/` into `dist/`, so the runtime fetches these by relative
+// URLs (./data/...) — same-origin, no CORS. The shape of `Sizes` mirrors the
+// schema docstring in OpenIPC/firmware:general/scripts/size_report.py.
 
-export type ManifestSource = "firmware" | "builder";
-
-export type AssetRef = {
-  url: string;
-  size: number;
-};
+export const SOURCES = ["firmware", "builder"] as const;
+export type Source = (typeof SOURCES)[number];
 
 export type Build = {
   id: string;
   sha: string;
   short: string;
   built_at: string;
-  release_url: string;
-  platforms: Record<string, PlatformAssets>;
+  platforms: string[];
 };
 
-export type PlatformAssets = {
-  nor?: AssetRef;
-  nand?: AssetRef;
-  sizes?: AssetRef;
-};
-
-export type Manifest = {
-  schema: number;
+export type IndexFile = {
+  schema: 1;
+  source: Source;
   generated_at: string;
-  channels: { nightly?: string; latest?: string };
+  retention: number;
   builds: Build[];
 };
 
