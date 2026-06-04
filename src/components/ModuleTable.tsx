@@ -7,8 +7,6 @@ type Filter = "all" | "autoloaded" | "ondemand";
 
 type Props = {
   modules: SizesModule[];
-  selected: Set<string>;
-  onToggle: (name: string) => void;
 };
 
 function fmtBytes(b: number): string {
@@ -17,7 +15,7 @@ function fmtBytes(b: number): string {
   return b + " B";
 }
 
-export function ModuleTable({ modules, selected, onToggle }: Props) {
+export function ModuleTable({ modules }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("bytes");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [filter, setFilter] = useState<Filter>("all");
@@ -84,9 +82,6 @@ export function ModuleTable({ modules, selected, onToggle }: Props) {
       <table className="data-table">
         <thead>
           <tr>
-            <th className="col-toggle" title="What-if: mark for disable">
-              ×
-            </th>
             <SortHeader k="name" current={sortKey} dir={sortDir} onClick={onSort}>
               Module
             </SortHeader>
@@ -119,34 +114,20 @@ export function ModuleTable({ modules, selected, onToggle }: Props) {
           </tr>
         </thead>
         <tbody>
-          {filtered.map((m) => {
-            const isSelected = selected.has(m.name);
-            return (
-              <tr
-                key={m.name}
-                className={isSelected ? "row-selected" : undefined}
-              >
-                <td className="col-toggle">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => onToggle(m.name)}
-                    title={`what-if: drop ${m.name}.ko`}
-                  />
-                </td>
-                <td>{m.name}</td>
-                <td className="num">{fmtBytes(m.bytes)}</td>
-                <td>{m.package}</td>
-                <td>{m.autoloaded ? "yes" : "—"}</td>
-                <td className="path">
-                  <code>{m.path}</code>
-                </td>
-              </tr>
-            );
-          })}
+          {filtered.map((m) => (
+            <tr key={m.name}>
+              <td>{m.name}</td>
+              <td className="num">{fmtBytes(m.bytes)}</td>
+              <td>{m.package}</td>
+              <td>{m.autoloaded ? "yes" : "—"}</td>
+              <td className="path">
+                <code>{m.path}</code>
+              </td>
+            </tr>
+          ))}
           {filtered.length === 0 && (
             <tr>
-              <td colSpan={6} className="muted">
+              <td colSpan={5} className="muted">
                 no modules match this filter
               </td>
             </tr>

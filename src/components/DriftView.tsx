@@ -1,19 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Build, Sizes } from "../lib/types";
-import { fetchSizes } from "../lib/sizes";
+import type { Build, Sizes, Source } from "../lib/types";
+import { fetchPlatformSizes } from "../lib/sizes";
+import { diffSizes, type DriftRow } from "../lib/drift";
 
 type Props = {
+  source: Source;
   builds: Build[];
   baseBuildId: string;
   platform: string;
-};
-
-type Row = {
-  kind: "package" | "module";
-  name: string;
-  before: number;
-  after: number;
-  delta: number;
 };
 
 function fmtBytes(b: number): string {
@@ -24,9 +18,12 @@ function fmtBytes(b: number): string {
   return sign + a + " B";
 }
 
-export function DriftView({ builds, baseBuildId, platform }: Props) {
+export function DriftView({ source, builds, baseBuildId, platform }: Props) {
   const otherBuilds = useMemo(
-    () => builds.filter((b) => b.id !== baseBuildId && b.platforms[platform]?.sizes),
+    () =>
+      builds.filter(
+        (b) => b.id !== baseBuildId && b.platforms.includes(platform),
+      ),
     [builds, baseBuildId, platform],
   );
 
@@ -37,8 +34,6 @@ export function DriftView({ builds, baseBuildId, platform }: Props) {
   const [cmpSizes, setCmpSizes] = useState<Sizes | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Reset cmp picker when base/platform changes so we don't end up comparing
-  // against a build that no longer has data for the new platform.
   useEffect(() => {
     setCompareId(otherBuilds[0]?.id ?? null);
     setCmpSizes(null);
@@ -47,53 +42,27 @@ export function DriftView({ builds, baseBuildId, platform }: Props) {
 
   useEffect(() => {
     setError(null);
-    const base = builds.find((b) => b.id === baseBuildId);
-    const cmp = compareId ? builds.find((b) => b.id === compareId) : null;
-    const baseUrl = base?.platforms[platform]?.sizes?.url;
-    const cmpUrl = cmp?.platforms[platform]?.sizes?.url;
-    if (!baseUrl || !cmpUrl) return;
-    Promise.all([fetchSizes(baseUrl), fetchSizes(cmpUrl)])
+    if (!compareId) return;
+    Promise.all([
+      fetchPlatformSizes(source, baseBuildId, platform),
+      fetchPlatformSizes(source, compareId, platform),
+    ])
       .then(([b, c]) => {
         setBaseSizes(b);
         setCmpSizes(c);
       })
       .catch((e: Error) => setError(e.message));
-  }, [builds, baseBuildId, compareId, platform]);
+  }, [source, baseBuildId, compareId, platform]);
 
-  const rows = useMemo<Row[]>(() => {
+  const rows = useMemo<DriftRow[]>(() => {
     if (!baseSizes || !cmpSizes) return [];
-    const out: Row[] = [];
-
-    const pkgBefore = new Map(cmpSizes.packages.map((p) => [p.name, p.uncompressed_bytes]));
-    const pkgAfter = new Map(baseSizes.packages.map((p) => [p.name, p.uncompressed_bytes]));
-    const allPkg = new Set([...pkgBefore.keys(), ...pkgAfter.keys()]);
-    for (const name of allPkg) {
-      const before = pkgBefore.get(name) ?? 0;
-      const after = pkgAfter.get(name) ?? 0;
-      if (before !== after) {
-        out.push({ kind: "package", name, before, after, delta: after - before });
-      }
-    }
-
-    const modBefore = new Map(cmpSizes.linux_components.modules.map((m) => [m.name, m.bytes]));
-    const modAfter = new Map(baseSizes.linux_components.modules.map((m) => [m.name, m.bytes]));
-    const allMod = new Set([...modBefore.keys(), ...modAfter.keys()]);
-    for (const name of allMod) {
-      const before = modBefore.get(name) ?? 0;
-      const after = modAfter.get(name) ?? 0;
-      if (before !== after) {
-        out.push({ kind: "module", name, before, after, delta: after - before });
-      }
-    }
-
-    out.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
-    return out;
+    return diffSizes(cmpSizes, baseSizes);
   }, [baseSizes, cmpSizes]);
 
   if (otherBuilds.length === 0) {
     return (
       <p className="muted">
-        No other build in this manifest has sizes data for{" "}
+        No other build in this catalogue has sizes data for{" "}
         <code>{platform}</code> — drift view needs at least two.
       </p>
     );
@@ -120,10 +89,12 @@ export function DriftView({ builds, baseBuildId, platform }: Props) {
       {baseSizes && cmpSizes && (
         <>
           <p className="muted">
-            <strong>{baseSizes.board}-{baseSizes.variant}</strong> — uncompressed
-            bytes per item, <code>{compareId}</code> ⇒{" "}
-            <code>{baseBuildId}</code>. Only items whose size changed are listed.
-            Sorted by absolute delta.
+            <strong>
+              {baseSizes.board}-{baseSizes.variant}
+            </strong>{" "}
+            — uncompressed bytes per item, <code>{compareId}</code> ⇒{" "}
+            <code>{baseBuildId}</code>. Only items whose size changed are
+            listed. Sorted by absolute delta.
           </p>
           <table className="data-table">
             <thead>

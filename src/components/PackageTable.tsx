@@ -7,8 +7,6 @@ type SortDir = "asc" | "desc";
 
 type Props = {
   packages: SizesPackage[];
-  selected: Set<string>;
-  onToggle: (name: string) => void;
 };
 
 function fmtBytes(b: number | null): string {
@@ -18,7 +16,7 @@ function fmtBytes(b: number | null): string {
   return b + " B";
 }
 
-export function PackageTable({ packages, selected, onToggle }: Props) {
+export function PackageTable({ packages }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("uncompressed");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -74,7 +72,6 @@ export function PackageTable({ packages, selected, onToggle }: Props) {
     <table className="data-table">
       <thead>
         <tr>
-          <th className="col-toggle" title="What-if: mark for disable">×</th>
           <th className="col-cat"></th>
           <SortHeader k="name" current={sortKey} dir={sortDir} onClick={onSort}>
             Package
@@ -113,21 +110,10 @@ export function PackageTable({ packages, selected, onToggle }: Props) {
         {sorted.map((p) => {
           const cat = categorise(p.name);
           const isExpanded = expanded.has(p.name);
-          const isSelected = selected.has(p.name);
           const share = total ? (p.uncompressed_bytes / total) * 100 : 0;
           return (
             <Fragment key={p.name}>
-              <tr
-                className={isSelected ? "row-selected" : undefined}
-              >
-                <td className="col-toggle">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => onToggle(p.name)}
-                    title={`what-if: disable ${p.name}`}
-                  />
-                </td>
+              <tr>
                 <td className="col-cat">
                   <span
                     className="cat-swatch"
@@ -151,7 +137,7 @@ export function PackageTable({ packages, selected, onToggle }: Props) {
               </tr>
               {isExpanded && (
                 <tr className="row-files">
-                  <td colSpan={7}>
+                  <td colSpan={6}>
                     <ul>
                       {p.top_files.length === 0 ? (
                         <li className="muted">no per-file breakdown</li>

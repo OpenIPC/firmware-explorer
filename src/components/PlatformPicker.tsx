@@ -8,11 +8,7 @@ type Props = {
 };
 
 export function PlatformPicker({ build, value, onChange, label = "Platform" }: Props) {
-  const entries = Object.entries(build.platforms)
-    .filter(([, a]) => a.sizes)
-    .sort(([a], [b]) => a.localeCompare(b));
-
-  const missing = Object.keys(build.platforms).length - entries.length;
+  const platforms = [...build.platforms].sort((a, b) => a.localeCompare(b));
 
   return (
     <label className="picker">
@@ -20,22 +16,19 @@ export function PlatformPicker({ build, value, onChange, label = "Platform" }: P
       <select
         value={value ?? ""}
         onChange={(e) => onChange(e.target.value)}
-        disabled={entries.length === 0}
+        disabled={platforms.length === 0}
       >
         <option value="" disabled>
-          {entries.length === 0 ? "no sizes data in this build" : "— pick a platform —"}
+          {platforms.length === 0
+            ? "no sizes data in this build"
+            : "— pick a platform —"}
         </option>
-        {entries.map(([plat]) => (
+        {platforms.map((plat) => (
           <option key={plat} value={plat}>
             {plat}
           </option>
         ))}
       </select>
-      {missing > 0 && (
-        <span className="picker-hint">
-          ({missing} platform{missing === 1 ? "" : "s"} without sizes data hidden)
-        </span>
-      )}
     </label>
   );
 }
