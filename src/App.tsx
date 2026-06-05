@@ -11,8 +11,9 @@ import { ModuleTable } from "./components/ModuleTable";
 import { PackageTreemap } from "./components/PackageTreemap";
 import { RemovedPanel } from "./components/RemovedPanel";
 import { DriftView } from "./components/DriftView";
+import { WhatIfPanel } from "./components/WhatIfPanel";
 
-type Tab = "tree" | "packages" | "modules" | "removed" | "drift";
+type Tab = "tree" | "packages" | "modules" | "removed" | "drift" | "configure";
 
 export function App() {
   const initial = useMemo(() => readQueryString(window.location.search), []);
@@ -132,25 +133,44 @@ export function App() {
           <SizeSummary sizes={sizes} />
 
           <nav className="tabs" role="tablist">
-            {(
-              [
-                ["tree", "Treemap"],
-                ["packages", `Packages (${sizes.packages.length})`],
-                ["modules", `Modules (${sizes.linux_components.modules.length})`],
-                ["removed", `Removed-by-finalize (${sizes.removed_by_finalize.length})`],
-                ["drift", "Drift vs another build"],
-              ] as Array<[Tab, string]>
-            ).map(([k, label]) => (
-              <button
-                key={k}
-                role="tab"
-                aria-selected={tab === k}
-                className={tab === k ? "active" : ""}
-                onClick={() => setTab(k)}
-              >
-                {label}
-              </button>
-            ))}
+            {(() => {
+              const kconfigAvailable =
+                platform !== null &&
+                index?.kconfig_available_for?.includes(platform);
+              const tabs: Array<[Tab, string, boolean]> = [
+                ["tree", "Treemap", true],
+                ["packages", `Packages (${sizes.packages.length})`, true],
+                [
+                  "modules",
+                  `Modules (${sizes.linux_components.modules.length})`,
+                  true,
+                ],
+                [
+                  "removed",
+                  `Removed-by-finalize (${sizes.removed_by_finalize.length})`,
+                  true,
+                ],
+                ["drift", "Drift vs another build", true],
+                ["configure", "Configure (what-if)", !!kconfigAvailable],
+              ];
+              return tabs.map(([k, label, enabled]) => (
+                <button
+                  key={k}
+                  role="tab"
+                  aria-selected={tab === k}
+                  className={tab === k ? "active" : ""}
+                  disabled={!enabled}
+                  title={
+                    !enabled && k === "configure"
+                      ? "Kconfig graph not yet published for this platform"
+                      : undefined
+                  }
+                  onClick={() => enabled && setTab(k)}
+                >
+                  {label}
+                </button>
+              ));
+            })()}
           </nav>
 
           <main>
@@ -169,6 +189,9 @@ export function App() {
                 baseBuildId={buildId}
                 platform={platform}
               />
+            )}
+            {tab === "configure" && platform && (
+              <WhatIfPanel source={source} platform={platform} sizes={sizes} />
             )}
           </main>
         </>
