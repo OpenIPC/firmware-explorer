@@ -28,6 +28,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -93,6 +94,7 @@ export type GhFn = (args: string[]) => string;
 export type FsHooks = {
   mkdir: (path: string) => void;
   write: (path: string, content: string | Uint8Array) => void;
+  read: (path: string) => string;
   exists: (path: string) => boolean;
   copyDir: (from: string, to: string) => void;
   rmDir: (path: string) => void;
@@ -108,6 +110,7 @@ export const defaultGh: GhFn = (args) =>
 export const defaultFs: FsHooks = {
   mkdir: (p) => mkdirSync(p, { recursive: true }),
   write: (p, c) => writeFileSync(p, c),
+  read: (p) => readFileSync(p, "utf-8"),
   exists: existsSync,
   copyDir: (from, to) => cpSync(from, to, { recursive: true }),
   rmDir: (p) => rmSync(p, { recursive: true, force: true }),
@@ -298,6 +301,18 @@ export async function runPrebuild(opts: RunOpts): Promise<{
       log,
     });
 
+    // v0.4: aggregate every (build × platform) sizes shard into a per-platform
+    // time-series file so the explorer can render historical drift charts
+    // without fetching 90+ shards client-side. Computed in-runner; cheap
+    // because we already have the shards on disk.
+    emitTrends({
+      builds,
+      source,
+      sourceOut,
+      fs,
+      log,
+    });
+
     const index: IndexFile = {
       schema: 1,
       source,
@@ -315,6 +330,133 @@ export async function runPrebuild(opts: RunOpts): Promise<{
   }
 
   return { builds: out };
+}
+
+// ---------------------------------------------------------------------------
+// Trends aggregation (v0.4)
+// ---------------------------------------------------------------------------
+
+type SeriesPoint = {
+  build_id: string;
+  built_at: string;
+  bytes: number;
+};
+
+type HeadroomPoint = {
+  build_id: string;
+  built_at: string;
+  used_kb: number;
+  cap_kb: number;
+  headroom_kb: number | null;
+};
+
+type PlatformAccumulator = {
+  packages: Record<string, SeriesPoint[]>;
+  modules: Record<string, SeriesPoint[]>;
+  headroom_rootfs: HeadroomPoint[];
+  headroom_kernel: HeadroomPoint[];
+};
+
+/**
+ * Walk every (build × platform) sizes shard on disk and emit per-platform
+ * time-series files at `<sourceOut>/trends/trends.<platform>.json`. The shape
+ * matches `src/lib/timeseries.ts`'s `TrendsFile` exactly so the runtime can
+ * fetch and consume without a remap step.
+ *
+ * Memory note: per-platform aggregation only allocates while a single
+ * platform's shards are being read; entries land in `acc` keyed by platform
+ * but each shard's JSON is dropped after extraction.
+ */
+function emitTrends(opts: {
+  builds: BuildEntry[];
+  source: Source;
+  sourceOut: string;
+  fs: FsHooks;
+  log: (msg: string) => void;
+}): void {
+  const { builds, source, sourceOut, fs, log } = opts;
+  const trendsOut = join(sourceOut, "trends");
+
+  const acc = new Map<string, PlatformAccumulator>();
+  const bucket = (plat: string): PlatformAccumulator => {
+    let b = acc.get(plat);
+    if (!b) {
+      b = { packages: {}, modules: {}, headroom_rootfs: [], headroom_kernel: [] };
+      acc.set(plat, b);
+    }
+    return b;
+  };
+
+  for (const build of builds) {
+    for (const plat of build.platforms) {
+      const shardPath = join(sourceOut, build.id, `sizes.${plat}.json`);
+      if (!fs.exists(shardPath)) continue;
+
+      let sizes: {
+        packages?: Array<{ name: string; uncompressed_bytes: number }>;
+        linux_components?: { modules?: Array<{ name: string; bytes: number }> };
+        headroom?: {
+          rootfs?: { used_kb: number; cap_kb: number; headroom_kb: number | null };
+          kernel?: { used_kb: number; cap_kb: number; headroom_kb: number | null };
+        };
+      };
+      try {
+        sizes = JSON.parse(fs.read(shardPath));
+      } catch (e) {
+        log(`[${source}] ${build.id}/${plat} shard parse failed: ${(e as Error).message}`);
+        continue;
+      }
+
+      const b = bucket(plat);
+      const stamp = {
+        build_id: build.id,
+        built_at: build.built_at,
+      };
+
+      for (const p of sizes.packages ?? []) {
+        (b.packages[p.name] ??= []).push({ ...stamp, bytes: p.uncompressed_bytes });
+      }
+      for (const m of sizes.linux_components?.modules ?? []) {
+        (b.modules[m.name] ??= []).push({ ...stamp, bytes: m.bytes });
+      }
+      if (sizes.headroom?.rootfs) {
+        b.headroom_rootfs.push({ ...stamp, ...sizes.headroom.rootfs });
+      }
+      if (sizes.headroom?.kernel) {
+        b.headroom_kernel.push({ ...stamp, ...sizes.headroom.kernel });
+      }
+    }
+  }
+
+  fs.rmDir(trendsOut);
+  fs.mkdir(trendsOut);
+
+  let written = 0;
+  for (const [plat, b] of acc) {
+    // Sort series ascending by built_at so consumers don't have to.
+    const sortPoints = (a: SeriesPoint, c: SeriesPoint) =>
+      a.built_at.localeCompare(c.built_at);
+    const sortHead = (a: HeadroomPoint, c: HeadroomPoint) =>
+      a.built_at.localeCompare(c.built_at);
+    for (const series of Object.values(b.packages)) series.sort(sortPoints);
+    for (const series of Object.values(b.modules)) series.sort(sortPoints);
+    b.headroom_rootfs.sort(sortHead);
+    b.headroom_kernel.sort(sortHead);
+
+    const out = {
+      schema: 1,
+      source,
+      platform: plat,
+      generated_at: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      packages: b.packages,
+      modules: b.modules,
+      headroom_rootfs: b.headroom_rootfs,
+      headroom_kernel: b.headroom_kernel,
+    };
+    fs.write(join(trendsOut, `trends.${plat}.json`), JSON.stringify(out) + "\n");
+    written++;
+  }
+  log(`[${source}] wrote trends for ${written} platforms`);
 }
 
 /**

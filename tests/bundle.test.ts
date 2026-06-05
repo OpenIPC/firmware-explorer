@@ -45,6 +45,8 @@ describe.skipIf(skip)("dist/ bundle invariants", () => {
       expect(content).not.toMatch(/releases\/download\/[^"'`]+\.json/);
       // v0.3 invariant: kconfig graph + help URLs must also stay same-origin.
       expect(content).not.toMatch(/releases\/download\/[^"'`]+kconfig[^"'`]+/);
+      // v0.4 invariant: trends.<plat>.json never crosses origin either.
+      expect(content).not.toMatch(/releases\/download\/[^"'`]+trends[^"'`]+/);
     },
   );
 

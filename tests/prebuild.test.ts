@@ -87,6 +87,11 @@ function memFs(): { fs: FsHooks; state: MemFsState } {
       ensureDirChain(dir);
       state.files.set(p, typeof c === "string" ? c : new TextDecoder().decode(c));
     },
+    read: (p) => {
+      const content = state.files.get(p);
+      if (content === undefined) throw new Error(`memFs: no such file ${p}`);
+      return content;
+    },
     exists: (p) => state.dirs.has(p) || state.files.has(p),
     copyDir: (from, to) => {
       ensureDirChain(to);

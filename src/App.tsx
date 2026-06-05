@@ -11,9 +11,17 @@ import { ModuleTable } from "./components/ModuleTable";
 import { PackageTreemap } from "./components/PackageTreemap";
 import { RemovedPanel } from "./components/RemovedPanel";
 import { DriftView } from "./components/DriftView";
+import { TrendsView } from "./components/TrendsView";
 import { WhatIfPanel } from "./components/WhatIfPanel";
 
-type Tab = "tree" | "packages" | "modules" | "removed" | "drift" | "configure";
+type Tab =
+  | "tree"
+  | "packages"
+  | "modules"
+  | "removed"
+  | "drift"
+  | "trends"
+  | "configure";
 
 export function App() {
   const initial = useMemo(() => readQueryString(window.location.search), []);
@@ -151,6 +159,7 @@ export function App() {
                   true,
                 ],
                 ["drift", "Drift vs another build", true],
+                ["trends", "Trends", true],
                 ["configure", "Configure (what-if)", !!kconfigAvailable],
               ];
               return tabs.map(([k, label, enabled]) => (
@@ -189,6 +198,9 @@ export function App() {
                 baseBuildId={buildId}
                 platform={platform}
               />
+            )}
+            {tab === "trends" && platform && (
+              <TrendsView source={source} platform={platform} />
             )}
             {tab === "configure" && platform && (
               <WhatIfPanel source={source} platform={platform} sizes={sizes} />

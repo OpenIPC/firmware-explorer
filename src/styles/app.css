@@ -566,6 +566,84 @@ td.path {
   cursor: not-allowed;
 }
 
+/* --- trends view --- */
+
+.trends-controls {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin: 16px 0 8px;
+}
+
+.trends-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.trends-controls span {
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.trends-controls input {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented button {
+  background: transparent;
+  border: 0;
+  color: var(--fg-muted);
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.segmented button.active {
+  background: var(--bg-elev2);
+  color: var(--fg);
+}
+
+.sparkline {
+  display: block;
+}
+
+.trend-axis-label {
+  font-size: 10px;
+  fill: var(--fg-muted);
+}
+
+.headroom-chart {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.headroom-chart-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
 /* --- removed-by-finalize panel --- */
 
 .removed p {
