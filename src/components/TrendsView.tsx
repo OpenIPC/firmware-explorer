@@ -8,6 +8,7 @@ import {
   type GrowerRow,
 } from "../lib/timeseries";
 import { fetchTrends } from "../lib/trends";
+import { fmtBytes, fmtPerWeek, fmtSignedBytes } from "../lib/format";
 
 type Props = {
   source: Source;
@@ -19,28 +20,6 @@ type Kind = "packages" | "modules";
 
 const WINDOW_OPTIONS: WindowDays[] = [7, 14, 30, 90];
 const TOP_N = 20;
-
-function fmtBytes(b: number): string {
-  const abs = Math.abs(b);
-  if (abs >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + " MB";
-  if (abs >= 1024) return (b / 1024).toFixed(1) + " KB";
-  return Math.round(b) + " B";
-}
-
-function fmtSignedBytes(b: number): string {
-  const sign = b > 0 ? "+" : b < 0 ? "−" : "";
-  const abs = Math.abs(b);
-  if (abs >= 1024 * 1024) return sign + (abs / 1024 / 1024).toFixed(2) + " MB";
-  if (abs >= 1024) return sign + (abs / 1024).toFixed(1) + " KB";
-  return sign + Math.round(abs) + " B";
-}
-
-function fmtPerWeek(perDay: number): string {
-  // perDay is a slope (delta / days, days can be fractional), so the result
-  // is usually a float. Round at the byte level so the leaderboard doesn't
-  // show "+28.565018715093696 B/wk".
-  return fmtSignedBytes(perDay * 7) + "/wk";
-}
 
 function fmtDate(iso: string): string {
   return iso.slice(0, 10);

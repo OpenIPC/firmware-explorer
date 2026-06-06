@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { SizesModule } from "../lib/types";
+import { fmtBytes } from "../lib/format";
 
 type SortKey = "name" | "bytes" | "package" | "autoloaded";
 type SortDir = "asc" | "desc";
@@ -8,12 +9,6 @@ type Filter = "all" | "autoloaded" | "ondemand";
 type Props = {
   modules: SizesModule[];
 };
-
-function fmtBytes(b: number): string {
-  if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + " MB";
-  if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
-  return Math.round(b) + " B";
-}
 
 export function ModuleTable({ modules }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("bytes");

@@ -4,6 +4,12 @@ export type ViewState = {
   source: Source;
   buildId: string | null;
   platform: string | null;
+  /**
+   * DriftView's comparison build. Null falls back to DriftView's default
+   * (the newest other-build that has this platform). Stays absent from the
+   * URL when null so fresh sessions don't carry stale `?compare=` baggage.
+   */
+  compareBuildId: string | null;
 };
 
 export function readQueryString(search: string): ViewState {
@@ -13,6 +19,7 @@ export function readQueryString(search: string): ViewState {
     source,
     buildId: p.get("build"),
     platform: p.get("plat"),
+    compareBuildId: p.get("compare"),
   };
 }
 
@@ -21,5 +28,6 @@ export function writeQueryString(state: ViewState): string {
   p.set("source", state.source);
   if (state.buildId) p.set("build", state.buildId);
   if (state.platform) p.set("plat", state.platform);
+  if (state.compareBuildId) p.set("compare", state.compareBuildId);
   return "?" + p.toString();
 }

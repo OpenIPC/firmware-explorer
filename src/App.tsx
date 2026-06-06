@@ -33,6 +33,9 @@ export function App() {
   const [sizes, setSizes] = useState<Sizes | null>(null);
   const [sizesError, setSizesError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("tree");
+  const [compareBuildId, setCompareBuildId] = useState<string | null>(
+    initial.compareBuildId,
+  );
 
   // Fetch index on source change.
   useEffect(() => {
@@ -71,8 +74,15 @@ export function App() {
 
   // Persist state to URL.
   useEffect(() => {
-    const q = writeQueryString({ source, buildId, platform });
+    const q = writeQueryString({ source, buildId, platform, compareBuildId });
     window.history.replaceState({}, "", window.location.pathname + q);
+  }, [source, buildId, platform, compareBuildId]);
+
+  // Drift's compare selection only makes sense within the current
+  // (source, buildId, platform) tuple. Reset on any of those changing so a
+  // stale compare ID doesn't survive a board / build switch.
+  useEffect(() => {
+    setCompareBuildId(null);
   }, [source, buildId, platform]);
 
   const build: Build | null = index && buildId
@@ -197,6 +207,8 @@ export function App() {
                 builds={index.builds}
                 baseBuildId={buildId}
                 platform={platform}
+                compareBuildId={compareBuildId}
+                onCompareChange={setCompareBuildId}
               />
             )}
             {tab === "trends" && platform && (
