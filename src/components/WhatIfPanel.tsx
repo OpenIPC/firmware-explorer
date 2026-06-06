@@ -5,7 +5,13 @@ import type {
   Sizes,
   Source,
 } from "../lib/types";
-import { closeDisable, defconfigFragment, fetchKconfigGraph, fetchKconfigHelp } from "../lib/kconfig";
+import {
+  buildRequest,
+  closeDisable,
+  defconfigFragment,
+  fetchKconfigGraph,
+  fetchKconfigHelp,
+} from "../lib/kconfig";
 import { fmtBytes } from "../lib/format";
 
 type Props = {
@@ -79,6 +85,26 @@ export function WhatIfPanel({ source, platform, sizes }: Props) {
     URL.revokeObjectURL(url);
   };
 
+  const openBuildRequest = () => {
+    if (!graph || !closure) return;
+    const headroomKb = sizes.headroom.rootfs.headroom_kb ?? 0;
+    const req = buildRequest({
+      graph,
+      disabled: closure.disabled,
+      savingsBytes: savings.bytes,
+      newHeadroomKb: headroomKb + Math.round(savings.bytes / 1024),
+      shareUrl: window.location.href,
+    });
+    if (req.truncated) {
+      const proceed = confirm(
+        "The defconfig fragment was clipped to fit GitHub's URL length budget. " +
+          "Open the issue anyway? You can paste the full fragment as a follow-up comment.",
+      );
+      if (!proceed) return;
+    }
+    window.open(req.url, "_blank", "noopener,noreferrer");
+  };
+
   if (error) {
     return <p className="error">configurator data unavailable: {error}</p>;
   }
@@ -120,13 +146,24 @@ export function WhatIfPanel({ source, platform, sizes }: Props) {
             ≈ {newHeadroomKb} KB
           </div>
         </div>
-        <button
-          className="btn-primary"
-          disabled={(closure?.disabled.size ?? 0) === 0}
-          onClick={downloadFragment}
-        >
-          Download defconfig fragment
-        </button>
+        <div className="what-if-actions">
+          <button
+            className="btn-primary"
+            disabled={(closure?.disabled.size ?? 0) === 0}
+            onClick={downloadFragment}
+            title="Save a Buildroot defconfig fragment you append to your board defconfig."
+          >
+            Download defconfig fragment
+          </button>
+          <button
+            className="btn-secondary"
+            disabled={(closure?.disabled.size ?? 0) === 0}
+            onClick={openBuildRequest}
+            title="Open a pre-filled build-request issue on OpenIPC/builder for a maintainer to dispatch."
+          >
+            Open build request
+          </button>
+        </div>
       </div>
 
       <table className="data-table">

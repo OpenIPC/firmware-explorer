@@ -194,3 +194,96 @@ export function defconfigFragment(
   }
   return lines.join("\n") + "\n";
 }
+
+// ---------------------------------------------------------------------------
+// Build-request flow — pre-fill a GitHub issue on OpenIPC/builder with the
+// user's defconfig fragment so maintainers can dispatch a custom build.
+// ---------------------------------------------------------------------------
+
+/**
+ * GitHub's new-issue URL accepts ~8000 characters total before truncation.
+ * Reserve a margin for the title + query keys + URL-encoding overhead;
+ * defconfig fragments above this threshold are clipped with a `<truncated>`
+ * marker rather than producing a silently broken URL.
+ */
+export const BUILD_REQUEST_MAX_BODY = 6000;
+export const BUILD_REQUEST_REPO = "OpenIPC/builder";
+export const BUILD_REQUEST_LABEL = "build-request";
+
+export type BuildRequestInput = {
+  graph: KconfigGraph;
+  disabled: ReadonlySet<string>;
+  savingsBytes: number;
+  newHeadroomKb: number | null;
+  shareUrl: string;
+};
+
+export type BuildRequest = {
+  title: string;
+  body: string;
+  url: string;
+  truncated: boolean;
+};
+
+/**
+ * Compose a GitHub issue URL on OpenIPC/builder pre-filled with the
+ * user's defconfig fragment and a short context block. Pure function:
+ * given identical inputs, returns byte-identical output (modulo the
+ * shareUrl that the caller passes through).
+ */
+export function buildRequest(input: BuildRequestInput): BuildRequest {
+  const { graph, disabled, savingsBytes, newHeadroomKb, shareUrl } = input;
+
+  const title = `Build request: ${graph.board}-${graph.variant} (${disabled.size} symbols off)`;
+
+  const fragment = defconfigFragment(graph, disabled);
+
+  const summary = [
+    `**Board**: \`${graph.board}-${graph.variant}\``,
+    `**Disabled symbols**: ${disabled.size}`,
+    `**Estimated rootfs savings**: ~${Math.round(savingsBytes / 1024)} KB`,
+    newHeadroomKb !== null
+      ? `**Projected rootfs headroom**: ≈ ${newHeadroomKb} KB`
+      : null,
+    `**Composed at**: ${shareUrl}`,
+  ]
+    .filter((s): s is string => s !== null)
+    .join("\n");
+
+  const note =
+    "<!-- Submitted from firmware-explorer. A maintainer can pick up this " +
+    "request and dispatch `build-one.yml` with the fragment below appended " +
+    "to the board defconfig. -->";
+
+  let truncated = false;
+  let fragmentBlock = fragment;
+  // Cap body so the URL stays under GitHub's input limit.
+  const overhead =
+    title.length + summary.length + note.length + 64 /* fenced-code + headings */;
+  const fragmentBudget = BUILD_REQUEST_MAX_BODY - overhead;
+  if (fragmentBlock.length > fragmentBudget) {
+    fragmentBlock = fragmentBlock.slice(0, Math.max(0, fragmentBudget - 32)) +
+      "\n# … truncated to fit URL budget …\n";
+    truncated = true;
+  }
+
+  const body = [
+    note,
+    "",
+    "## Summary",
+    summary,
+    "",
+    "## Defconfig fragment",
+    "```",
+    fragmentBlock.replace(/\n$/, ""),
+    "```",
+  ].join("\n");
+
+  const params = new URLSearchParams();
+  params.set("labels", BUILD_REQUEST_LABEL);
+  params.set("title", title);
+  params.set("body", body);
+  const url = `https://github.com/${BUILD_REQUEST_REPO}/issues/new?${params.toString()}`;
+
+  return { title, body, url, truncated };
+}

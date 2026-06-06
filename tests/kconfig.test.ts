@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { closeDisable, defconfigFragment } from "../src/lib/kconfig";
+import {
+  BUILD_REQUEST_LABEL,
+  BUILD_REQUEST_MAX_BODY,
+  BUILD_REQUEST_REPO,
+  buildRequest,
+  closeDisable,
+  defconfigFragment,
+} from "../src/lib/kconfig";
 import type { KconfigGraph, KconfigSymbol } from "../src/lib/types";
 
 const sym = (over: Partial<KconfigSymbol> = {}): KconfigSymbol => ({
@@ -158,5 +165,111 @@ describe("defconfigFragment", () => {
     const text = defconfigFragment(g, new Set(["BR2_PACKAGE_X"]));
     expect(text).toContain("openipc.github.io/firmware-explorer");
     expect(text).toContain("test-t");
+  });
+});
+
+describe("buildRequest", () => {
+  const shareUrl =
+    "https://openipc.github.io/firmware-explorer/?source=firmware&build=nightly-XYZ&plat=hi3518ev300-lite";
+
+  it("targets OpenIPC/builder with the build-request label", () => {
+    const g = graph({ BR2_PACKAGE_FOO: sym() });
+    const r = buildRequest({
+      graph: g,
+      disabled: new Set(["BR2_PACKAGE_FOO"]),
+      savingsBytes: 50_000,
+      newHeadroomKb: 120,
+      shareUrl,
+    });
+    expect(r.url).toContain(`github.com/${BUILD_REQUEST_REPO}/issues/new`);
+    expect(r.url).toContain(`labels=${BUILD_REQUEST_LABEL}`);
+    expect(r.truncated).toBe(false);
+  });
+
+  it("embeds the defconfig fragment + savings + share URL in the body", () => {
+    const g = graph({
+      BR2_PACKAGE_MAJESTIC: sym({ package: "majestic" }),
+      BR2_PACKAGE_R8188EU: sym({ package: "r8188eu" }),
+    });
+    const r = buildRequest({
+      graph: g,
+      disabled: new Set(["BR2_PACKAGE_MAJESTIC", "BR2_PACKAGE_R8188EU"]),
+      savingsBytes: 200_000,
+      newHeadroomKb: 270,
+      shareUrl,
+    });
+    expect(r.body).toContain("# BR2_PACKAGE_MAJESTIC is not set");
+    expect(r.body).toContain("# BR2_PACKAGE_R8188EU is not set");
+    expect(r.body).toMatch(/~\s*195\s*KB/); // round(200_000 / 1024)
+    expect(r.body).toContain("≈ 270 KB");
+    expect(r.body).toContain(shareUrl);
+  });
+
+  it("derives the title from board, variant, and symbol count", () => {
+    const g = graph({
+      BR2_PACKAGE_A: sym(),
+      BR2_PACKAGE_B: sym(),
+    });
+    const r = buildRequest({
+      graph: g,
+      disabled: new Set(["BR2_PACKAGE_A", "BR2_PACKAGE_B"]),
+      savingsBytes: 0,
+      newHeadroomKb: null,
+      shareUrl,
+    });
+    expect(r.title).toBe("Build request: test-t (2 symbols off)");
+    // URL-encoded title makes it through URLSearchParams unmodified semantically.
+    const params = new URLSearchParams(new URL(r.url).search);
+    expect(params.get("title")).toBe(r.title);
+    expect(params.get("body")).toBe(r.body);
+  });
+
+  it("URL-encodes payload that contains symbols / newlines / hashes", () => {
+    const g = graph({ BR2_PACKAGE_X: sym() });
+    const r = buildRequest({
+      graph: g,
+      disabled: new Set(["BR2_PACKAGE_X"]),
+      savingsBytes: 0,
+      newHeadroomKb: null,
+      shareUrl,
+    });
+    // The raw URL must not contain bare # or newline — both would break
+    // the query / fragment boundary.
+    const queryPart = r.url.split("?")[1] ?? "";
+    expect(queryPart).not.toMatch(/\n/);
+    expect(queryPart).not.toMatch(/#[A-Z_]+\s/);
+  });
+
+  it("truncates the fragment when it would blow the URL budget", () => {
+    // Many symbols → fragment grows past BUILD_REQUEST_MAX_BODY.
+    const syms: Record<string, ReturnType<typeof sym>> = {};
+    for (let i = 0; i < 400; i++) {
+      syms[`BR2_PACKAGE_SYM_${String(i).padStart(4, "0")}`] = sym();
+    }
+    const g = graph(syms);
+    const r = buildRequest({
+      graph: g,
+      disabled: new Set(Object.keys(syms)),
+      savingsBytes: 9_999_999,
+      newHeadroomKb: 999,
+      shareUrl,
+    });
+    expect(r.truncated).toBe(true);
+    expect(r.body).toContain("truncated");
+    expect(r.body.length).toBeLessThanOrEqual(BUILD_REQUEST_MAX_BODY);
+    // Even truncated, the URL stays well under the GitHub-imposed limit.
+    expect(r.url.length).toBeLessThan(8000);
+  });
+
+  it("omits the projected-headroom line when newHeadroomKb is null", () => {
+    const g = graph({ BR2_PACKAGE_X: sym() });
+    const r = buildRequest({
+      graph: g,
+      disabled: new Set(["BR2_PACKAGE_X"]),
+      savingsBytes: 1024,
+      newHeadroomKb: null,
+      shareUrl,
+    });
+    expect(r.body).not.toContain("Projected rootfs headroom");
   });
 });
