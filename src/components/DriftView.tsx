@@ -3,6 +3,7 @@ import type { Build, Sizes, Source } from "../lib/types";
 import { fetchPlatformSizes } from "../lib/sizes";
 import { diffSizes, type DriftRow } from "../lib/drift";
 import { fmtBytes, fmtSignedBytes } from "../lib/format";
+import { buildOptionLabel } from "./BuildPicker";
 
 type Props = {
   source: Source;
@@ -85,9 +86,9 @@ export function DriftView({
           value={effectiveCompareId ?? ""}
           onChange={(e) => onCompareChange(e.target.value)}
         >
-          {otherBuilds.map((b) => (
-            <option key={b.id} value={b.id}>
-              {b.id} — {b.built_at}
+          {otherBuilds.map((b, i) => (
+            <option key={b.id} value={b.id} title={b.id}>
+              {buildOptionLabel(b, i === 0)}
             </option>
           ))}
         </select>
