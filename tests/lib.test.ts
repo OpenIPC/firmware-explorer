@@ -59,6 +59,7 @@ describe("url query (de)serialisation", () => {
       buildId: "nightly-20260604-679c2c7",
       platform: "gk7205v210_lite_tiandy-tc-c32qn",
       compareBuildId: null,
+      helpOpen: false,
     };
     const q = writeQueryString(state);
     expect(readQueryString(q)).toEqual(state);
@@ -70,10 +71,30 @@ describe("url query (de)serialisation", () => {
       buildId: "nightly-20260605-d7e89a8",
       platform: "hi3518ev300-lite",
       compareBuildId: "nightly-20260604-679c2c7",
+      helpOpen: false,
     };
     const q = writeQueryString(state);
     expect(q).toContain("compare=nightly-20260604-679c2c7");
     expect(readQueryString(q)).toEqual(state);
+  });
+
+  it("round-trips help-open flag", () => {
+    const state = {
+      source: "firmware" as const,
+      buildId: null,
+      platform: null,
+      compareBuildId: null,
+      helpOpen: true,
+    };
+    const q = writeQueryString(state);
+    expect(q).toContain("help=1");
+    expect(readQueryString(q)).toEqual(state);
+  });
+
+  it("treats help=0 / absent as closed", () => {
+    expect(readQueryString("").helpOpen).toBe(false);
+    expect(readQueryString("?help=0").helpOpen).toBe(false);
+    expect(readQueryString("?help=").helpOpen).toBe(false);
   });
 
   it("omits null fields", () => {
@@ -82,6 +103,7 @@ describe("url query (de)serialisation", () => {
       buildId: null,
       platform: null,
       compareBuildId: null,
+      helpOpen: false,
     };
     expect(writeQueryString(state)).toBe("?source=firmware");
   });
