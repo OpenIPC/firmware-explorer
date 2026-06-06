@@ -13,6 +13,7 @@ import { RemovedPanel } from "./components/RemovedPanel";
 import { DriftView } from "./components/DriftView";
 import { TrendsView } from "./components/TrendsView";
 import { WhatIfPanel } from "./components/WhatIfPanel";
+import { HelpPanel } from "./components/HelpPanel";
 
 type Tab =
   | "tree"
@@ -36,6 +37,7 @@ export function App() {
   const [compareBuildId, setCompareBuildId] = useState<string | null>(
     initial.compareBuildId,
   );
+  const [helpOpen, setHelpOpen] = useState<boolean>(initial.helpOpen);
 
   // Fetch index on source change.
   useEffect(() => {
@@ -74,9 +76,15 @@ export function App() {
 
   // Persist state to URL.
   useEffect(() => {
-    const q = writeQueryString({ source, buildId, platform, compareBuildId });
+    const q = writeQueryString({
+      source,
+      buildId,
+      platform,
+      compareBuildId,
+      helpOpen,
+    });
     window.history.replaceState({}, "", window.location.pathname + q);
-  }, [source, buildId, platform, compareBuildId]);
+  }, [source, buildId, platform, compareBuildId, helpOpen]);
 
   // Drift's compare selection only makes sense within the current
   // (source, buildId, platform) tuple. Reset on any of those changing so a
@@ -94,7 +102,7 @@ export function App() {
       <header>
         <h1>
           OpenIPC firmware explorer{" "}
-          <span className="version-tag">v0.2</span>
+          <span className="version-tag">v0.5</span>
         </h1>
         <div className="source-toggle" role="tablist" aria-label="Manifest source">
           {(["firmware", "builder"] as Source[]).map((s) => (
@@ -114,6 +122,14 @@ export function App() {
             </button>
           ))}
         </div>
+        <button
+          className="help-button"
+          onClick={() => setHelpOpen(true)}
+          aria-label="Open help"
+          title="Help (?)"
+        >
+          ? Help
+        </button>
       </header>
 
       <section className="pickers">
@@ -249,6 +265,8 @@ export function App() {
           </a>
         </p>
       </footer>
+
+      {helpOpen && <HelpPanel onClose={() => setHelpOpen(false)} />}
     </div>
   );
 }
