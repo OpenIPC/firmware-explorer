@@ -11,6 +11,12 @@ type Props = {
 };
 
 function fmtBytes(b: number): string {
+  if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + " MB";
+  if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
+  return Math.round(b) + " B";
+}
+
+function fmtSignedBytes(b: number): string {
   const sign = b < 0 ? "−" : b > 0 ? "+" : "";
   const a = Math.abs(b);
   if (a >= 1024 * 1024) return sign + (a / 1024 / 1024).toFixed(2) + " MB";
@@ -123,7 +129,7 @@ export function DriftView({ source, builds, baseBuildId, platform }: Props) {
                   <td className="num">{fmtBytes(r.before)}</td>
                   <td className="num">{fmtBytes(r.after)}</td>
                   <td className="num">
-                    <strong>{fmtBytes(r.delta)}</strong>
+                    <strong>{fmtSignedBytes(r.delta)}</strong>
                   </td>
                 </tr>
               ))}
