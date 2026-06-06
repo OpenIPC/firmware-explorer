@@ -58,13 +58,31 @@ describe("url query (de)serialisation", () => {
       source: "builder" as const,
       buildId: "nightly-20260604-679c2c7",
       platform: "gk7205v210_lite_tiandy-tc-c32qn",
+      compareBuildId: null,
     };
     const q = writeQueryString(state);
     expect(readQueryString(q)).toEqual(state);
   });
 
+  it("round-trips Drift compare build", () => {
+    const state = {
+      source: "firmware" as const,
+      buildId: "nightly-20260605-d7e89a8",
+      platform: "hi3518ev300-lite",
+      compareBuildId: "nightly-20260604-679c2c7",
+    };
+    const q = writeQueryString(state);
+    expect(q).toContain("compare=nightly-20260604-679c2c7");
+    expect(readQueryString(q)).toEqual(state);
+  });
+
   it("omits null fields", () => {
-    const state = { source: "firmware" as const, buildId: null, platform: null };
+    const state = {
+      source: "firmware" as const,
+      buildId: null,
+      platform: null,
+      compareBuildId: null,
+    };
     expect(writeQueryString(state)).toBe("?source=firmware");
   });
 });

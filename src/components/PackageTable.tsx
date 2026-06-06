@@ -1,6 +1,7 @@
 import { Fragment, useMemo, useState } from "react";
 import type { SizesPackage } from "../lib/types";
 import { categorise, CATEGORY_COLOUR, CATEGORY_LABEL } from "../lib/categorise";
+import { fmtBytesOrNull as fmtBytes } from "../lib/format";
 
 type SortKey = "name" | "uncompressed" | "compressed" | "files";
 type SortDir = "asc" | "desc";
@@ -8,13 +9,6 @@ type SortDir = "asc" | "desc";
 type Props = {
   packages: SizesPackage[];
 };
-
-function fmtBytes(b: number | null): string {
-  if (b === null) return "n/a";
-  if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + " MB";
-  if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
-  return Math.round(b) + " B";
-}
 
 export function PackageTable({ packages }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("uncompressed");

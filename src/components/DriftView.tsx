@@ -2,29 +2,25 @@ import { useEffect, useMemo, useState } from "react";
 import type { Build, Sizes, Source } from "../lib/types";
 import { fetchPlatformSizes } from "../lib/sizes";
 import { diffSizes, type DriftRow } from "../lib/drift";
+import { fmtBytes, fmtSignedBytes } from "../lib/format";
 
 type Props = {
   source: Source;
   builds: Build[];
   baseBuildId: string;
   platform: string;
+  compareBuildId: string | null;
+  onCompareChange: (id: string) => void;
 };
 
-function fmtBytes(b: number): string {
-  if (b >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + " MB";
-  if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
-  return Math.round(b) + " B";
-}
-
-function fmtSignedBytes(b: number): string {
-  const sign = b < 0 ? "−" : b > 0 ? "+" : "";
-  const a = Math.abs(b);
-  if (a >= 1024 * 1024) return sign + (a / 1024 / 1024).toFixed(2) + " MB";
-  if (a >= 1024) return sign + (a / 1024).toFixed(1) + " KB";
-  return sign + Math.round(a) + " B";
-}
-
-export function DriftView({ source, builds, baseBuildId, platform }: Props) {
+export function DriftView({
+  source,
+  builds,
+  baseBuildId,
+  platform,
+  compareBuildId,
+  onCompareChange,
+}: Props) {
   const otherBuilds = useMemo(
     () =>
       builds.filter(
@@ -33,32 +29,39 @@ export function DriftView({ source, builds, baseBuildId, platform }: Props) {
     [builds, baseBuildId, platform],
   );
 
-  const [compareId, setCompareId] = useState<string | null>(
-    otherBuilds[0]?.id ?? null,
-  );
+  // The compare select is controlled by the URL-bearing parent. When the
+  // parent passes null, fall back to the newest other-build that has this
+  // platform — same behaviour as v0.2, just without an internal source of
+  // truth. The effective ID is what actually drives the fetch.
+  const effectiveCompareId = useMemo(() => {
+    if (compareBuildId && otherBuilds.some((b) => b.id === compareBuildId)) {
+      return compareBuildId;
+    }
+    return otherBuilds[0]?.id ?? null;
+  }, [compareBuildId, otherBuilds]);
+
   const [baseSizes, setBaseSizes] = useState<Sizes | null>(null);
   const [cmpSizes, setCmpSizes] = useState<Sizes | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setCompareId(otherBuilds[0]?.id ?? null);
     setCmpSizes(null);
     setBaseSizes(null);
-  }, [baseBuildId, platform, otherBuilds]);
+  }, [baseBuildId, platform]);
 
   useEffect(() => {
     setError(null);
-    if (!compareId) return;
+    if (!effectiveCompareId) return;
     Promise.all([
       fetchPlatformSizes(source, baseBuildId, platform),
-      fetchPlatformSizes(source, compareId, platform),
+      fetchPlatformSizes(source, effectiveCompareId, platform),
     ])
       .then(([b, c]) => {
         setBaseSizes(b);
         setCmpSizes(c);
       })
       .catch((e: Error) => setError(e.message));
-  }, [source, baseBuildId, compareId, platform]);
+  }, [source, baseBuildId, effectiveCompareId, platform]);
 
   const rows = useMemo<DriftRow[]>(() => {
     if (!baseSizes || !cmpSizes) return [];
@@ -79,8 +82,8 @@ export function DriftView({ source, builds, baseBuildId, platform }: Props) {
       <label className="picker">
         <span className="picker-label">Compare against</span>
         <select
-          value={compareId ?? ""}
-          onChange={(e) => setCompareId(e.target.value)}
+          value={effectiveCompareId ?? ""}
+          onChange={(e) => onCompareChange(e.target.value)}
         >
           {otherBuilds.map((b) => (
             <option key={b.id} value={b.id}>
@@ -98,7 +101,7 @@ export function DriftView({ source, builds, baseBuildId, platform }: Props) {
             <strong>
               {baseSizes.board}-{baseSizes.variant}
             </strong>{" "}
-            — uncompressed bytes per item, <code>{compareId}</code> ⇒{" "}
+            — uncompressed bytes per item, <code>{effectiveCompareId}</code> ⇒{" "}
             <code>{baseBuildId}</code>. Only items whose size changed are
             listed. Sorted by absolute delta.
           </p>
