@@ -132,18 +132,11 @@ export function PackageTable({ packages }: Props) {
               {isExpanded && (
                 <tr className="row-files">
                   <td colSpan={6}>
-                    <ul>
-                      {p.top_files.length === 0 ? (
-                        <li className="muted">no per-file breakdown</li>
-                      ) : (
-                        p.top_files.map((f) => (
-                          <li key={f.path}>
-                            <code>{f.path}</code>{" "}
-                            <span className="muted">{fmtBytes(f.bytes)}</span>
-                          </li>
-                        ))
-                      )}
-                    </ul>
+                    <TopFilesBreakdown
+                      topFiles={p.top_files}
+                      totalFiles={p.file_count}
+                      totalBytes={p.uncompressed_bytes}
+                    />
                   </td>
                 </tr>
               )}
@@ -177,5 +170,56 @@ function SortHeader({
       {children}
       {indicator}
     </th>
+  );
+}
+
+function TopFilesBreakdown({
+  topFiles,
+  totalFiles,
+  totalBytes,
+}: {
+  topFiles: ReadonlyArray<{ path: string; bytes: number }>;
+  totalFiles: number;
+  totalBytes: number;
+}) {
+  if (topFiles.length === 0) {
+    return (
+      <p className="muted">
+        no per-file breakdown ({totalFiles.toLocaleString("en-US")}{" "}
+        file{totalFiles === 1 ? "" : "s"} total)
+      </p>
+    );
+  }
+
+  const shownBytes = topFiles.reduce((s, f) => s + f.bytes, 0);
+  const remainingFiles = Math.max(0, totalFiles - topFiles.length);
+  const remainingBytes = Math.max(0, totalBytes - shownBytes);
+
+  return (
+    <div>
+      <p className="files-caption muted">
+        Top <strong>{topFiles.length}</strong> of{" "}
+        <strong>{totalFiles.toLocaleString("en-US")}</strong> file
+        {totalFiles === 1 ? "" : "s"}
+        {remainingFiles > 0 ? (
+          <>
+            {" "}— remaining {remainingFiles.toLocaleString("en-US")} file
+            {remainingFiles === 1 ? "" : "s"} ({fmtBytes(remainingBytes)} total)
+            aren't itemised in <code>sizes.json</code>
+          </>
+        ) : (
+          <> — full list</>
+        )}
+        .
+      </p>
+      <ul>
+        {topFiles.map((f) => (
+          <li key={f.path}>
+            <code>{f.path}</code>{" "}
+            <span className="muted">{fmtBytes(f.bytes)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

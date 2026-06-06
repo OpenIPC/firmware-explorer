@@ -454,6 +454,18 @@ td.path {
   display: inline-block;
 }
 
+/* --- expanded file list inside the Packages table --- */
+
+.files-caption {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.row-files ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 /* --- help overlay --- */
 
 body.help-open {
