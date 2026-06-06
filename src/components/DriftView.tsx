@@ -15,7 +15,7 @@ function fmtBytes(b: number): string {
   const a = Math.abs(b);
   if (a >= 1024 * 1024) return sign + (a / 1024 / 1024).toFixed(2) + " MB";
   if (a >= 1024) return sign + (a / 1024).toFixed(1) + " KB";
-  return sign + a + " B";
+  return sign + Math.round(a) + " B";
 }
 
 export function DriftView({ source, builds, baseBuildId, platform }: Props) {

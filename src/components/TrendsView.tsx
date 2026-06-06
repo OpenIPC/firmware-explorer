@@ -24,7 +24,7 @@ function fmtBytes(b: number): string {
   const abs = Math.abs(b);
   if (abs >= 1024 * 1024) return (b / 1024 / 1024).toFixed(2) + " MB";
   if (abs >= 1024) return (b / 1024).toFixed(1) + " KB";
-  return b + " B";
+  return Math.round(b) + " B";
 }
 
 function fmtSignedBytes(b: number): string {
@@ -32,10 +32,13 @@ function fmtSignedBytes(b: number): string {
   const abs = Math.abs(b);
   if (abs >= 1024 * 1024) return sign + (abs / 1024 / 1024).toFixed(2) + " MB";
   if (abs >= 1024) return sign + (abs / 1024).toFixed(1) + " KB";
-  return sign + abs + " B";
+  return sign + Math.round(abs) + " B";
 }
 
 function fmtPerWeek(perDay: number): string {
+  // perDay is a slope (delta / days, days can be fractional), so the result
+  // is usually a float. Round at the byte level so the leaderboard doesn't
+  // show "+28.565018715093696 B/wk".
   return fmtSignedBytes(perDay * 7) + "/wk";
 }
 
