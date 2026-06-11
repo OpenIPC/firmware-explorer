@@ -303,6 +303,135 @@ describe("runPrebuild", () => {
     ]);
   });
 
+  // -------------------------------------------------------------------------
+  // Completeness gating (partial / in-flight upstream releases)
+  // -------------------------------------------------------------------------
+
+  it("skips an in-flight build that lacks the completion marker but is newer than a marked build", async () => {
+    const withMarker: FakeRelease[] = [
+      {
+        // Newest: publish still in flight — no `_manifest.json` yet.
+        tagName: "nightly-20260605-bbbbbbb",
+        createdAt: "2026-06-05T00:00:00Z",
+        isPrerelease: true,
+        body: "sha=b\nshort=bbbbbbb\nbuilt_at=2026-06-05T00:00:00Z\n",
+        assets: [{ name: "sizes.foo-lite.json", size: 100 }],
+      },
+      {
+        // Older: fully published — carries the completion marker.
+        tagName: "nightly-20260604-aaaaaaa",
+        createdAt: "2026-06-04T00:00:00Z",
+        isPrerelease: true,
+        body: "sha=a\nshort=aaaaaaa\nbuilt_at=2026-06-04T00:00:00Z\n",
+        assets: [
+          { name: "sizes.foo-lite.json", size: 100 },
+          { name: "_manifest.json", size: 50 },
+        ],
+      },
+    ];
+    const { fs } = memFs();
+    const gh = makeGh(fs, withMarker);
+
+    const result = await runPrebuild({
+      outDir: "/out",
+      cacheDir: "/cache",
+      gh,
+      fs,
+      sources: ["firmware"],
+      retention: 90,
+      log: () => {},
+    });
+
+    // Only the marked (complete) build is ingested; the in-flight one is held.
+    expect(result.builds.firmware.map((b) => b.id)).toEqual([
+      "nightly-20260604-aaaaaaa",
+    ]);
+  });
+
+  it("trusts marker-less legacy builds older than the newest marked build", async () => {
+    const mixed: FakeRelease[] = [
+      {
+        tagName: "nightly-20260605-eeeeeee",
+        createdAt: "2026-06-05T00:00:00Z",
+        isPrerelease: true,
+        body: "sha=e\nshort=eeeeeee\nbuilt_at=2026-06-05T00:00:00Z\n",
+        assets: [
+          { name: "sizes.foo-lite.json", size: 100 },
+          { name: "_manifest.json", size: 50 },
+        ],
+      },
+      {
+        // Pre-marker history: no `_manifest.json`, but older than the marked
+        // build, so it is trusted rather than treated as in-flight.
+        tagName: "nightly-20260604-fffffff",
+        createdAt: "2026-06-04T00:00:00Z",
+        isPrerelease: true,
+        body: "sha=f\nshort=fffffff\nbuilt_at=2026-06-04T00:00:00Z\n",
+        assets: [{ name: "sizes.foo-lite.json", size: 100 }],
+      },
+    ];
+    const { fs } = memFs();
+    const gh = makeGh(fs, mixed);
+
+    const result = await runPrebuild({
+      outDir: "/out",
+      cacheDir: "/cache",
+      gh,
+      fs,
+      sources: ["firmware"],
+      retention: 90,
+      log: () => {},
+    });
+
+    expect(result.builds.firmware.map((b) => b.id)).toEqual([
+      "nightly-20260605-eeeeeee",
+      "nightly-20260604-fffffff",
+    ]);
+  });
+
+  it("re-fetches a partial cache once the release advertises more shards", async () => {
+    const complete: FakeRelease[] = [
+      {
+        tagName: "nightly-20260604-ddddddd",
+        createdAt: "2026-06-04T00:00:00Z",
+        isPrerelease: true,
+        body: "sha=d\nshort=ddddddd\nbuilt_at=2026-06-04T00:00:00Z\n",
+        assets: [
+          { name: "sizes.a-lite.json", size: 100 },
+          { name: "sizes.b-lite.json", size: 100 },
+          { name: "_manifest.json", size: 50 },
+        ],
+      },
+    ];
+    const { fs, state } = memFs();
+    const gh = makeGh(fs, complete);
+
+    // Seed a stale, partial cache from an earlier rate-limited run: only 1 of
+    // the 2 shards the release now advertises.
+    fs.write(
+      "/cache/firmware/nightly-20260604-ddddddd/sizes.a-lite.json",
+      JSON.stringify({ schema: 1, board: "stale" }),
+    );
+
+    const result = await runPrebuild({
+      outDir: "/out",
+      cacheDir: "/cache",
+      gh,
+      fs,
+      sources: ["firmware"],
+      retention: 90,
+      log: () => {},
+    });
+
+    // Both shards present after the forced re-fetch (partial cache not served).
+    expect(result.builds.firmware[0].platforms).toEqual(["a-lite", "b-lite"]);
+    expect(
+      state.files.has(
+        "/out/firmware/nightly-20260604-ddddddd/sizes.b-lite.json",
+      ),
+    ).toBe(true);
+  });
+
   it("preserves compound platform names through the round-trip", async () => {
     const compound: FakeRelease[] = [
       {
