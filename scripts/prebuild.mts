@@ -47,6 +47,12 @@ export const REPOS: Record<Source, string> = {
 
 export const TAG_RE = /^nightly-\d{8}-[0-9a-f]{7}$/;
 export const SIZES_RE = /^sizes\.(.+)\.json$/;
+// Completion marker the upstream publish job uploads to the dated release LAST,
+// once every other asset has landed. Its presence is the single source of truth
+// that the release finished publishing; a dated release missing it was either
+// truncated mid-upload (GitHub secondary rate limit) or is still in flight. See
+// hasCompletionMarker() and the boundary gate in runPrebuild().
+export const MANIFEST_ASSET = "_manifest.json";
 export const KCONFIG_GRAPH_RE = /^kconfig-graph\.(.+)\.json$/;
 export const KCONFIG_HELP_RE = /^kconfig-help\.(.+)\.json$/;
 
@@ -143,6 +149,17 @@ export function platformFromKconfigGraphName(name: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * True when the release carries the completion marker (`_manifest.json`),
+ * i.e. the upstream publish job finished uploading every asset. Used to keep
+ * partially-published / in-flight dated releases out of the catalogue.
+ */
+export function hasCompletionMarker(
+  detail: GhReleaseDetail | undefined,
+): boolean {
+  return !!detail?.assets?.some((a) => a.name === MANIFEST_ASSET);
+}
+
 export type RunOpts = {
   outDir: string;
   cacheDir?: string;
@@ -198,15 +215,68 @@ export async function runPrebuild(opts: RunOpts): Promise<{
 
     const builds: BuildEntry[] = [];
 
+    // Pre-fetch release metadata for every candidate tag up front (the same
+    // `release view` we needed per-tag anyway, just gathered first) so we can
+    // locate the newest build bearing a completion marker. tags are newest-first.
+    const details = new Map<string, GhReleaseDetail>();
     for (const r of tags) {
-      const tag = r.tagName;
+      try {
+        const raw = gh([
+          "release",
+          "view",
+          r.tagName,
+          "--repo",
+          repo,
+          "--json",
+          "tagName,createdAt,body,assets",
+        ]);
+        details.set(r.tagName, JSON.parse(raw) as GhReleaseDetail);
+      } catch (e) {
+        log(`[${source}] ${r.tagName} metadata fetch failed: ${(e as Error).message}`);
+      }
+    }
+
+    // Completeness boundary. Upstream's publish job uploads the `_manifest.json`
+    // marker LAST, so a build NEWER than the newest marked build that lacks its
+    // own marker is a publish still in flight (or one that died on the GitHub
+    // secondary rate limit mid-upload) — it must not enter the catalogue as a
+    // complete build. Builds at or older than the newest marker that lack one
+    // are legacy (pre-marker) history and are trusted as-is, preserving the
+    // historical window. When no retained tag carries a marker (pre-rollout of
+    // the upstream fix), newestMarkerIdx is -1 and this gate is fully inert —
+    // every build is ingested exactly as before.
+    const newestMarkerIdx = tags.findIndex((r) =>
+      hasCompletionMarker(details.get(r.tagName)),
+    );
+    const inMarkerEra = newestMarkerIdx !== -1;
+
+    for (let i = 0; i < tags.length; i++) {
+      const tag = tags[i].tagName;
       const tagOut = join(sourceOut, tag);
       const tagCache = join(cacheDir, source, tag);
 
+      const detail = details.get(tag);
+      if (!detail) continue; // metadata unavailable — cannot assess; skip.
+
+      if (inMarkerEra && i < newestMarkerIdx && !hasCompletionMarker(detail)) {
+        log(
+          `[${source}] ${tag} no completion marker and newer than newest published build — skipping (publish likely in flight)`,
+        );
+        continue;
+      }
+
+      // The release advertises every asset it holds, so the count of `sizes.*`
+      // assets is the authoritative expected shard count. A cache holding fewer
+      // shards than that is a partial download from an earlier rate-limited run
+      // and must be re-fetched rather than served as final.
+      const expectedSizes = detail.assets.filter((a) =>
+        SIZES_RE.test(a.name),
+      ).length;
+      const cachedShards = fs
+        .listDir(tagCache)
+        .filter((n) => SIZES_RE.test(n)).length;
       const cached =
-        !forceRefetch &&
-        fs.exists(tagCache) &&
-        fs.listDir(tagCache).some((n) => n.endsWith(".json"));
+        !forceRefetch && expectedSizes > 0 && cachedShards >= expectedSizes;
 
       if (!cached) {
         log(`[${source}] ${tag} downloading sizes.*.json`);
@@ -240,24 +310,6 @@ export async function runPrebuild(opts: RunOpts): Promise<{
 
       if (downloaded.length === 0) {
         // No sizes.json assets on this release — skip.
-        continue;
-      }
-
-      // Fetch release metadata (sha/short/built_at from the body).
-      let detail: GhReleaseDetail;
-      try {
-        const raw = gh([
-          "release",
-          "view",
-          tag,
-          "--repo",
-          repo,
-          "--json",
-          "tagName,createdAt,body,assets",
-        ]);
-        detail = JSON.parse(raw) as GhReleaseDetail;
-      } catch (e) {
-        log(`[${source}] ${tag} metadata fetch failed: ${(e as Error).message}`);
         continue;
       }
 
