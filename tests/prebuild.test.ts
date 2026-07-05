@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
+  fetchReleases,
   parseBody,
   platformFromAssetName,
   runPrebuild,
   type FsHooks,
   type GhFn,
+  type HttpFn,
 } from "../scripts/prebuild.mts";
 
 // ---------------------------------------------------------------------------
@@ -132,53 +134,134 @@ type FakeRelease = {
   assets: FakeAsset[];
 };
 
-function makeGh(fs: FsHooks, releases: FakeRelease[]): GhFn {
+function assetUrl(repo: string, tag: string, name: string): string {
+  return `https://github.com/${repo}/releases/download/${tag}/${name}`;
+}
+
+function makeGh(releases: FakeRelease[]): GhFn {
   return (args) => {
-    // gh release list --repo <repo> --limit N --json tagName,createdAt,isPrerelease
-    if (args[0] === "release" && args[1] === "list") {
+    // Only endpoint the new prebuild hits: paginated /releases enumeration.
+    // Matches `gh api ... /repos/<repo>/releases?per_page=100&page=N`.
+    if (args[0] === "api") {
+      const path = args.find((a) => a.startsWith("/repos/"));
+      if (!path) throw new Error(`unmocked gh api path: ${args.join(" ")}`);
+      const repoMatch = /^\/repos\/([^/]+\/[^/]+)\/releases/.exec(path);
+      if (!repoMatch) throw new Error(`unexpected gh api path: ${path}`);
+      const repo = repoMatch[1];
+      const pageMatch = /[?&]page=(\d+)/.exec(path);
+      const page = pageMatch ? parseInt(pageMatch[1], 10) : 1;
+      // 100 per page; fakes fit in one page.
+      if (page > 1) return "[]";
       return JSON.stringify(
         releases.map((r) => ({
-          tagName: r.tagName,
-          createdAt: r.createdAt,
-          isPrerelease: r.isPrerelease,
+          tag_name: r.tagName,
+          created_at: r.createdAt,
+          prerelease: r.isPrerelease,
+          body: r.body,
+          assets: r.assets.map((a) => ({
+            name: a.name,
+            size: a.size,
+            browser_download_url: assetUrl(repo, r.tagName, a.name),
+          })),
         })),
       );
     }
-
-    // gh release view <tag> --repo <repo> --json tagName,createdAt,body,assets
-    if (args[0] === "release" && args[1] === "view") {
-      const tag = args[2];
-      const rel = releases.find((r) => r.tagName === tag);
-      if (!rel) throw new Error(`no fake release for tag ${tag}`);
-      return JSON.stringify({
-        tagName: rel.tagName,
-        createdAt: rel.createdAt,
-        body: rel.body,
-        assets: rel.assets.map((a) => ({ name: a.name, size: a.size })),
-      });
-    }
-
-    // gh release download <tag> --repo <repo> --pattern 'sizes.*.json' --dir <dir> --skip-existing
-    if (args[0] === "release" && args[1] === "download") {
-      const tag = args[2];
-      const dirIdx = args.indexOf("--dir");
-      const target = args[dirIdx + 1];
-      const rel = releases.find((r) => r.tagName === tag);
-      if (!rel) throw new Error(`no fake release for tag ${tag}`);
-      for (const a of rel.assets) {
-        if (a.name.startsWith("sizes.") && a.name.endsWith(".json")) {
-          fs.write(
-            target + "/" + a.name,
-            a.content ?? JSON.stringify({ schema: 1, board: "x" }),
-          );
-        }
-      }
-      return "";
-    }
-
     throw new Error(`unmocked gh call: ${args.join(" ")}`);
   };
 }
+
+function makeHttp(fs: FsHooks, releases: FakeRelease[]): HttpFn {
+  return (url, target) => {
+    // URLs look like https://github.com/<repo>/releases/download/<tag>/<name>.
+    const m = /\/releases\/download\/([^/]+)\/(.+)$/.exec(url);
+    if (!m) throw new Error(`unexpected download URL: ${url}`);
+    const [, tag, name] = m;
+    const rel = releases.find((r) => r.tagName === tag);
+    if (!rel) throw new Error(`no fake release for tag ${tag}`);
+    const asset = rel.assets.find((a) => a.name === name);
+    if (!asset) throw new Error(`no fake asset ${name} on ${tag}`);
+    fs.write(
+      target,
+      asset.content ?? JSON.stringify({ schema: 1, board: "x" }),
+    );
+  };
+}
+
+// ---------------------------------------------------------------------------
+// fetchReleases — one paginated call per source, no per-tag API calls
+// ---------------------------------------------------------------------------
+
+describe("fetchReleases", () => {
+  it("caps at one API call per 100 releases and returns full detail", () => {
+    const rows = Array.from({ length: 42 }, (_, i) => ({
+      tagName: `nightly-2026060${(i % 9) + 1}-abcdef${i.toString(16).padStart(1, "0")}`,
+      createdAt: `2026-07-0${(i % 9) + 1}T00:00:00Z`,
+      isPrerelease: true,
+      body: `sha=fake${i}\n`,
+      assets: [{ name: `sizes.p${i}-lite.json`, size: 1000 + i }],
+    }));
+    let calls = 0;
+    const gh: GhFn = (args) => {
+      calls++;
+      // Assert we're using /releases and not the old subcommands.
+      expect(args[0]).toBe("api");
+      const path = args.find((a) => a.startsWith("/repos/"))!;
+      expect(path).toContain("/releases");
+      expect(path).toContain("per_page=100");
+      return JSON.stringify(
+        rows.map((r) => ({
+          tag_name: r.tagName,
+          created_at: r.createdAt,
+          prerelease: r.isPrerelease,
+          body: r.body,
+          assets: r.assets.map((a) => ({
+            name: a.name,
+            size: a.size,
+            browser_download_url: `https://github.com/OpenIPC/firmware/releases/download/${r.tagName}/${a.name}`,
+          })),
+        })),
+      );
+    };
+    const { list, detail } = fetchReleases(gh, "OpenIPC/firmware");
+    // 42 releases fit in one page — stops early on partial page.
+    expect(calls).toBe(1);
+    expect(list).toHaveLength(42);
+    expect(detail.size).toBe(42);
+    const first = detail.get(rows[0].tagName)!;
+    expect(first.body).toBe(rows[0].body);
+    expect(first.assets[0].downloadUrl).toContain("browser_download_url".slice(0, 0)); // downloadUrl populated
+    expect(first.assets[0].downloadUrl).toContain(
+      `/releases/download/${rows[0].tagName}/${rows[0].assets[0].name}`,
+    );
+  });
+
+  it("paginates when the API returns a full page", () => {
+    // 100 rows on page 1 → advance to page 2. Page 2 returns 5 → stop.
+    const page1 = Array.from({ length: 100 }, (_, i) => ({
+      tag_name: `t${i}`,
+      created_at: "2026-06-01T00:00:00Z",
+      prerelease: true,
+      body: "",
+      assets: [],
+    }));
+    const page2 = Array.from({ length: 5 }, (_, i) => ({
+      tag_name: `late-t${i}`,
+      created_at: "2026-05-30T00:00:00Z",
+      prerelease: true,
+      body: "",
+      assets: [],
+    }));
+    const gh: GhFn = (args) => {
+      const path = args.find((a) => a.startsWith("/repos/"))!;
+      const page = /[?&]page=(\d+)/.exec(path)?.[1] ?? "1";
+      if (page === "1") return JSON.stringify(page1);
+      if (page === "2") return JSON.stringify(page2);
+      return "[]";
+    };
+    const { list } = fetchReleases(gh, "OpenIPC/firmware");
+    expect(list).toHaveLength(105);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // runPrebuild integration test
@@ -215,12 +298,14 @@ describe("runPrebuild", () => {
 
   it("walks one source, filters non-nightly tags, emits index + shards", async () => {
     const { fs, state } = memFs();
-    const gh = makeGh(fs, releases);
+    const gh = makeGh(releases);
+    const http = makeHttp(fs, releases);
 
     const result = await runPrebuild({
       outDir: "/out",
       cacheDir: "/cache",
       gh,
+      http,
       fs,
       sources: ["firmware"],
       retention: 90,
@@ -283,12 +368,14 @@ describe("runPrebuild", () => {
       assets: [{ name: "sizes.foo-lite.json", size: 100 }],
     }));
     const { fs, state } = memFs();
-    const gh = makeGh(fs, many);
+    const gh = makeGh(many);
+    const http = makeHttp(fs, many);
 
     await runPrebuild({
       outDir: "/out",
       cacheDir: "/cache",
       gh,
+      http,
       fs,
       sources: ["firmware"],
       retention: 2,
@@ -330,12 +417,14 @@ describe("runPrebuild", () => {
       },
     ];
     const { fs } = memFs();
-    const gh = makeGh(fs, withMarker);
+    const gh = makeGh(withMarker);
+    const http = makeHttp(fs, withMarker);
 
     const result = await runPrebuild({
       outDir: "/out",
       cacheDir: "/cache",
       gh,
+      http,
       fs,
       sources: ["firmware"],
       retention: 90,
@@ -371,12 +460,14 @@ describe("runPrebuild", () => {
       },
     ];
     const { fs } = memFs();
-    const gh = makeGh(fs, mixed);
+    const gh = makeGh(mixed);
+    const http = makeHttp(fs, mixed);
 
     const result = await runPrebuild({
       outDir: "/out",
       cacheDir: "/cache",
       gh,
+      http,
       fs,
       sources: ["firmware"],
       retention: 90,
@@ -404,7 +495,8 @@ describe("runPrebuild", () => {
       },
     ];
     const { fs, state } = memFs();
-    const gh = makeGh(fs, complete);
+    const gh = makeGh(complete);
+    const http = makeHttp(fs, complete);
 
     // Seed a stale, partial cache from an earlier rate-limited run: only 1 of
     // the 2 shards the release now advertises.
@@ -417,6 +509,7 @@ describe("runPrebuild", () => {
       outDir: "/out",
       cacheDir: "/cache",
       gh,
+      http,
       fs,
       sources: ["firmware"],
       retention: 90,
@@ -447,12 +540,14 @@ describe("runPrebuild", () => {
       },
     ];
     const { fs, state } = memFs();
-    const gh = makeGh(fs, compound);
+    const gh = makeGh(compound);
+    const http = makeHttp(fs, compound);
 
     const result = await runPrebuild({
       outDir: "/out",
       cacheDir: "/cache",
       gh,
+      http,
       fs,
       sources: ["builder"],
       retention: 1,

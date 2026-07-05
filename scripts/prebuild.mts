@@ -66,8 +66,71 @@ export type GhReleaseDetail = {
   tagName: string;
   createdAt: string;
   body: string;
-  assets: Array<{ name: string; size: number }>;
+  assets: Array<{ name: string; size: number; downloadUrl?: string }>;
 };
+
+/**
+ * Raw shape of `GET /repos/:owner/:repo/releases` — we consume this and
+ * reshape into GhReleaseDetail. Named to match the API field casing so the
+ * translation site is obvious.
+ */
+type ReleaseApiRow = {
+  tag_name: string;
+  created_at: string;
+  prerelease: boolean;
+  body: string | null;
+  assets: Array<{
+    name: string;
+    size: number;
+    browser_download_url: string;
+  }>;
+};
+
+/**
+ * Paginated `gh api /repos/:owner/:repo/releases`. Returns every release with
+ * its full metadata + asset list + download URLs in one place, replacing the
+ * old `gh release list` + per-tag `gh release view` pattern that cost ~91
+ * API calls per source.
+ *
+ * `per_page=100` is the API's cap. We stop early on the first partial page
+ * (< 100 rows) since GitHub returns them in strict newest-first order.
+ */
+export function fetchReleases(
+  gh: GhFn,
+  repo: string,
+  maxPages = 5,
+): { list: GhRelease[]; detail: Map<string, GhReleaseDetail> } {
+  const list: GhRelease[] = [];
+  const detail = new Map<string, GhReleaseDetail>();
+  for (let page = 1; page <= maxPages; page++) {
+    const raw = gh([
+      "api",
+      "-H",
+      "Accept: application/vnd.github+json",
+      `/repos/${repo}/releases?per_page=100&page=${page}`,
+    ]);
+    const rows = JSON.parse(raw) as ReleaseApiRow[];
+    for (const row of rows) {
+      list.push({
+        tagName: row.tag_name,
+        createdAt: row.created_at,
+        isPrerelease: row.prerelease,
+      });
+      detail.set(row.tag_name, {
+        tagName: row.tag_name,
+        createdAt: row.created_at,
+        body: row.body ?? "",
+        assets: row.assets.map((a) => ({
+          name: a.name,
+          size: a.size,
+          downloadUrl: a.browser_download_url,
+        })),
+      });
+    }
+    if (rows.length < 100) break;
+  }
+  return { list, detail };
+}
 
 export type Asset = { name: string; size: number };
 
@@ -112,6 +175,37 @@ export const defaultGh: GhFn = (args) =>
     encoding: "utf-8",
     maxBuffer: 64 * 1024 * 1024,
   });
+
+/**
+ * Asset-byte fetcher, split off `GhFn` so the runtime can bypass the
+ * GitHub API entirely for asset downloads. `browser_download_url` on
+ * public releases is served anonymously by github.com (302 to a signed
+ * CDN URL) and consumes zero of the installation's API rate-limit
+ * bucket — the ~9000-call/day nightly cost is the root of the
+ * consecutive-cron failures (runs 28646280479 / 28698970626 /
+ * 28733698722).
+ *
+ * `curl --retry 5 --retry-delay 5 --retry-connrefused` handles genuine
+ * transient network failures (timeouts, DNS blips, CDN 5xx) natively
+ * so we don't need our own retry loop layered on top.
+ */
+export type HttpFn = (url: string, target: string) => void;
+export const defaultHttp: HttpFn = (url, target) =>
+  execFileSync(
+    "curl",
+    [
+      "-fsSL",
+      "--retry",
+      "5",
+      "--retry-delay",
+      "5",
+      "--retry-all-errors",
+      "-o",
+      target,
+      url,
+    ],
+    { encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 },
+  );
 
 export const defaultFs: FsHooks = {
   mkdir: (p) => mkdirSync(p, { recursive: true }),
@@ -164,6 +258,7 @@ export type RunOpts = {
   outDir: string;
   cacheDir?: string;
   gh?: GhFn;
+  http?: HttpFn;
   fs?: FsHooks;
   sources?: readonly Source[];
   retention?: number;
@@ -176,6 +271,7 @@ export async function runPrebuild(opts: RunOpts): Promise<{
   builds: Record<Source, BuildEntry[]>;
 }> {
   const gh = opts.gh ?? defaultGh;
+  const http = opts.http ?? defaultHttp;
   const fs = opts.fs ?? defaultFs;
   const sources = opts.sources ?? SOURCES;
   const retention = opts.retention ?? 90;
@@ -190,19 +286,13 @@ export async function runPrebuild(opts: RunOpts): Promise<{
 
   for (const source of sources) {
     const repo = REPOS[source];
-    log(`[${source}] listing releases from ${repo}`);
-    const releaseListRaw = gh([
-      "release",
-      "list",
-      "--repo",
-      repo,
-      "--limit",
-      "200",
-      "--json",
-      "tagName,createdAt,isPrerelease",
-    ]);
-    const allReleases = JSON.parse(releaseListRaw) as GhRelease[];
-    const nightlies = allReleases
+    log(`[${source}] enumerating releases from ${repo}`);
+    // Single paginated `gh api /releases` call yields every release with its
+    // metadata + asset URLs. Replaces the old `release list` (1 call) plus
+    // per-tag `release view` (~retention calls) — cuts enumeration cost from
+    // ~91 to 1-2 API calls per source.
+    const { list, detail: details } = fetchReleases(gh, repo);
+    const nightlies = list
       .filter((r) => TAG_RE.test(r.tagName))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, retention);
@@ -214,27 +304,6 @@ export async function runPrebuild(opts: RunOpts): Promise<{
     fs.mkdir(sourceOut);
 
     const builds: BuildEntry[] = [];
-
-    // Pre-fetch release metadata for every candidate tag up front (the same
-    // `release view` we needed per-tag anyway, just gathered first) so we can
-    // locate the newest build bearing a completion marker. tags are newest-first.
-    const details = new Map<string, GhReleaseDetail>();
-    for (const r of tags) {
-      try {
-        const raw = gh([
-          "release",
-          "view",
-          r.tagName,
-          "--repo",
-          repo,
-          "--json",
-          "tagName,createdAt,body,assets",
-        ]);
-        details.set(r.tagName, JSON.parse(raw) as GhReleaseDetail);
-      } catch (e) {
-        log(`[${source}] ${r.tagName} metadata fetch failed: ${(e as Error).message}`);
-      }
-    }
 
     // Completeness boundary. Upstream's publish job uploads the `_manifest.json`
     // marker LAST, so a build NEWER than the newest marked build that lacks its
@@ -282,19 +351,18 @@ export async function runPrebuild(opts: RunOpts): Promise<{
         log(`[${source}] ${tag} downloading sizes.*.json`);
         fs.rmDir(tagCache);
         fs.mkdir(tagCache);
+        // Anonymous HTTPS to browser_download_url — bypasses the API bucket
+        // entirely. This is the single biggest saving vs the old `gh release
+        // download` path, which internally makes one API call per asset (~97
+        // calls per tag × 90 tags = ~8700 API calls per source per run).
         try {
-          gh([
-            "release",
-            "download",
-            tag,
-            "--repo",
-            repo,
-            "--pattern",
-            "sizes.*.json",
-            "--dir",
-            tagCache,
-            "--skip-existing",
-          ]);
+          for (const asset of detail.assets) {
+            if (!SIZES_RE.test(asset.name)) continue;
+            if (!asset.downloadUrl) {
+              throw new Error(`no browser_download_url on ${asset.name}`);
+            }
+            http(asset.downloadUrl, join(tagCache, asset.name));
+          }
         } catch (e) {
           log(`[${source}] ${tag} download failed: ${(e as Error).message}`);
           continue;
@@ -344,11 +412,11 @@ export async function runPrebuild(opts: RunOpts): Promise<{
     const kconfigAvailableFor = await downloadKconfig({
       builds,
       source,
-      repo,
+      details,
       sourceOut,
       cacheDir,
       forceRefetch,
-      gh,
+      http,
       fs,
       log,
     });
@@ -521,20 +589,21 @@ function emitTrends(opts: {
 async function downloadKconfig(args: {
   builds: BuildEntry[];
   source: Source;
-  repo: string;
+  details: Map<string, GhReleaseDetail>;
   sourceOut: string;
   cacheDir: string;
   forceRefetch: boolean;
-  gh: GhFn;
+  http: HttpFn;
   fs: FsHooks;
   log: (msg: string) => void;
 }): Promise<string[]> {
-  const { builds, source, repo, sourceOut, cacheDir, forceRefetch, gh, fs, log } = args;
+  const { builds, source, details, sourceOut, cacheDir, forceRefetch, http, fs, log } = args;
   const kconfigOut = join(sourceOut, "kconfig");
 
   for (const build of builds) {
     const tag = build.id;
     const kcCache = join(cacheDir, source, tag, "kconfig");
+    const detail = details.get(tag);
 
     const cached =
       !forceRefetch &&
@@ -542,23 +611,22 @@ async function downloadKconfig(args: {
       fs.listDir(kcCache).some((n) => KCONFIG_GRAPH_RE.test(n));
 
     if (!cached) {
+      if (!detail) continue;
+      const kconfigAssets = detail.assets.filter(
+        (a) => KCONFIG_GRAPH_RE.test(a.name) || KCONFIG_HELP_RE.test(a.name),
+      );
+      if (kconfigAssets.length === 0) continue; // no kconfig on this tag
       fs.rmDir(kcCache);
       fs.mkdir(kcCache);
       try {
-        gh([
-          "release",
-          "download",
-          tag,
-          "--repo",
-          repo,
-          "--pattern",
-          "kconfig-*.json",
-          "--dir",
-          kcCache,
-          "--skip-existing",
-        ]);
-      } catch {
-        // No kconfig assets on this tag — try the next one.
+        for (const asset of kconfigAssets) {
+          if (!asset.downloadUrl) {
+            throw new Error(`no browser_download_url on ${asset.name}`);
+          }
+          http(asset.downloadUrl, join(kcCache, asset.name));
+        }
+      } catch (e) {
+        log(`[${source}] ${tag} kconfig download failed: ${(e as Error).message}`);
         continue;
       }
     }
