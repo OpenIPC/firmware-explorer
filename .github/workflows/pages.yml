@@ -40,15 +40,22 @@ jobs:
           node-version: "22"
           cache: npm
       - run: npm ci
-      # `npm run build` invokes `npm run prebuild` first, which uses the
-      # built-in `gh` CLI to download `sizes.*.json` release assets from
-      # OpenIPC/firmware and OpenIPC/builder, server-side. CORS is structurally
-      # not a question during this step — only the in-browser fetches need to
-      # stay same-origin.
+      # `npm run build` invokes `npm run prebuild` first. Prebuild enumerates
+      # releases with ONE paginated `gh api /releases` call per source and
+      # fetches asset bytes via anonymous HTTPS on the browser_download_url —
+      # both to slash our footprint against the installation-wide API rate
+      # limit, which was blowing up consecutive nightly deploys in the busy
+      # 07:20–07:50 UTC cron window (runs 28646280479 / 28698970626 /
+      # 28733698722). See scripts/prebuild.mts.
       - run: npm run build
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: actions/configure-pages@v5
+      # `actions/configure-pages@v5` was dropped: its only job was to fetch
+      # Pages site config via the API, and it was tripping on the same rate
+      # limit (runs 28698970626 / 28733698722). We don't consume any of its
+      # outputs (Vite `base` is hardcoded), and `deploy-pages@v4` works
+      # without it as long as Pages is already enabled on the repo — which
+      # it is, configured to build via GitHub Actions.
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
