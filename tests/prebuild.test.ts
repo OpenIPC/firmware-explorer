@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  looksLikeRateLimit,
   parseBody,
   platformFromAssetName,
   runPrebuild,
+  withRateLimitRetry,
   type FsHooks,
   type GhFn,
 } from "../scripts/prebuild.mts";
@@ -469,5 +471,102 @@ describe("runPrebuild", () => {
         "/out/builder/nightly-20260604-ccccccc/sizes.gk7205v210_lite_tiandy-tc-c32qn.json",
       ),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rate-limit retry (guards against runs 28646280479 / 28698970626 / 28733698722)
+// ---------------------------------------------------------------------------
+
+describe("looksLikeRateLimit", () => {
+  it.each([
+    ["API rate limit exceeded for installation", true],
+    ["You have exceeded a secondary rate limit", true],
+    ["HTTP 403: forbidden — API rate limit exceeded", true],
+    ["HTTP 429: too many requests", true],
+    ["gh: release not found", false],
+    ["ENETUNREACH getaddrinfo", false],
+    ["", false],
+  ])("matches %j -> %j", (input, expected) => {
+    expect(looksLikeRateLimit(input)).toBe(expected);
+  });
+});
+
+describe("withRateLimitRetry", () => {
+  const rateLimitErr = () => {
+    const e = new Error("gh: 403 forbidden") as Error & { stderr?: string };
+    e.stderr = "HTTP 403: API rate limit exceeded for installation";
+    return e;
+  };
+
+  it("returns the first successful attempt without sleeping", () => {
+    const calls: string[][] = [];
+    const sleeps: number[] = [];
+    const gh: GhFn = (args) => {
+      calls.push(args);
+      return "OK";
+    };
+    const wrapped = withRateLimitRetry(gh, {
+      sleeps: [10, 20],
+      sleep: (ms) => sleeps.push(ms),
+      log: () => {},
+    });
+    expect(wrapped(["release", "list"])).toBe("OK");
+    expect(calls).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("retries after a rate-limit failure and succeeds", () => {
+    let n = 0;
+    const sleeps: number[] = [];
+    const gh: GhFn = () => {
+      n++;
+      if (n < 3) throw rateLimitErr();
+      return "OK";
+    };
+    const wrapped = withRateLimitRetry(gh, {
+      sleeps: [10, 20, 40],
+      sleep: (ms) => sleeps.push(ms),
+      log: () => {},
+    });
+    expect(wrapped(["release", "list"])).toBe("OK");
+    expect(n).toBe(3);
+    expect(sleeps).toEqual([10, 20]); // slept before attempts 2 and 3
+  });
+
+  it("fails fast on non-rate-limit errors", () => {
+    let n = 0;
+    const sleeps: number[] = [];
+    const gh: GhFn = () => {
+      n++;
+      throw new Error("gh: release not found");
+    };
+    const wrapped = withRateLimitRetry(gh, {
+      sleeps: [10, 20],
+      sleep: (ms) => sleeps.push(ms),
+      log: () => {},
+    });
+    expect(() => wrapped(["release", "view", "nonexistent"])).toThrow(
+      /release not found/,
+    );
+    expect(n).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("gives up after the sleep budget is exhausted", () => {
+    let n = 0;
+    const sleeps: number[] = [];
+    const gh: GhFn = () => {
+      n++;
+      throw rateLimitErr();
+    };
+    const wrapped = withRateLimitRetry(gh, {
+      sleeps: [10, 20],
+      sleep: (ms) => sleeps.push(ms),
+      log: () => {},
+    });
+    expect(() => wrapped(["release", "list"])).toThrow(/403 forbidden/);
+    expect(n).toBe(3); // 1 initial + 2 retries
+    expect(sleeps).toEqual([10, 20]);
   });
 });

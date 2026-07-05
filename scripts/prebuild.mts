@@ -107,11 +107,96 @@ export type FsHooks = {
   listDir: (path: string) => string[];
 };
 
-export const defaultGh: GhFn = (args) =>
+/**
+ * Sleep synchronously (execFileSync itself is sync) so retry-with-backoff
+ * doesn't require an async plumbing rewrite across every gh call site.
+ * Uses `Atomics.wait` on a fresh SharedArrayBuffer — no child process,
+ * no busy loop, no polyfill.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * `gh` shell-out with rate-limit-aware retry.
+ *
+ * The GITHUB_TOKEN installation-wide rate limit gets exhausted during busy
+ * cron windows (07:20–07:50 UTC saw three consecutive nightly failures on
+ * runs 28646280479 / 28698970626 / 28733698722 — each at a different step,
+ * whichever one happened to consume the last of the shared bucket). The
+ * bucket resets on a rolling hour, so a short backoff often lets the next
+ * attempt succeed. Fail-fast for anything that isn't a rate-limit signal so
+ * genuine errors still surface without wasted delay.
+ */
+export const RL_SLEEPS_MS = [30_000, 60_000, 120_000, 240_000];
+export const RL_PATTERNS = [
+  /API rate limit exceeded/i,
+  /secondary rate limit/i,
+  /You have exceeded a secondary rate limit/i,
+  /HTTP 403/i,
+  /HTTP 429/i,
+];
+
+/**
+ * Pull the `stderr` string off whatever shape execFileSync (or a mock) threw.
+ * Rate-limit signals arrive on stderr; `.message` is a Node-formatted wrapper
+ * that includes the command args but not always the underlying reason.
+ */
+function errText(e: unknown): string {
+  const err = e as { stderr?: Buffer | string; message?: string };
+  const stderr = err.stderr?.toString?.() ?? "";
+  return stderr + "\n" + (err.message ?? "");
+}
+
+export function looksLikeRateLimit(errorText: string): boolean {
+  return RL_PATTERNS.some((p) => p.test(errorText));
+}
+
+/**
+ * Wrap a base GhFn with rate-limit-aware retry.
+ *
+ * Fails fast on anything that doesn't look like a rate-limit response, so
+ * genuine errors (bad tag, bad flag, network unreachable) still surface
+ * immediately. Sleeps + attempts are injectable so tests don't have to wait.
+ */
+export function withRateLimitRetry(
+  base: GhFn,
+  opts: {
+    sleeps?: number[];
+    sleep?: (ms: number) => void;
+    log?: (msg: string) => void;
+  } = {},
+): GhFn {
+  const sleeps = opts.sleeps ?? RL_SLEEPS_MS;
+  const sleep = opts.sleep ?? sleepSync;
+  const log = opts.log ?? ((m) => process.stderr.write(m + "\n"));
+  return (args) => {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= sleeps.length; attempt++) {
+      try {
+        return base(args);
+      } catch (e) {
+        lastErr = e;
+        if (!looksLikeRateLimit(errText(e)) || attempt === sleeps.length) throw e;
+        const wait = sleeps[attempt];
+        log(
+          `[prebuild] gh rate-limit hit on attempt ${attempt + 1} ` +
+            `(${args.slice(0, 3).join(" ")}); sleeping ${wait / 1000}s before retry`,
+        );
+        sleep(wait);
+      }
+    }
+    throw lastErr;
+  };
+}
+
+const rawGh: GhFn = (args) =>
   execFileSync("gh", args, {
     encoding: "utf-8",
     maxBuffer: 64 * 1024 * 1024,
   });
+
+export const defaultGh: GhFn = withRateLimitRetry(rawGh);
 
 export const defaultFs: FsHooks = {
   mkdir: (p) => mkdirSync(p, { recursive: true }),

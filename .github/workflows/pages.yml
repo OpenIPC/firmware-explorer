@@ -48,7 +48,30 @@ jobs:
       - run: npm run build
         env:
           GH_TOKEN: ${{ github.token }}
-      - uses: actions/configure-pages@v5
+      # `actions/configure-pages` fetches Pages config via the GitHub API.
+      # That call hits the workflow's installation-wide token rate limit
+      # during busy cron windows (07:20–07:50 UTC saw two consecutive
+      # deploys fail here: runs 28698970626 and 28733698722). Retry with
+      # backoff instead of `uses:`-ing the action directly, since the
+      # limit resets on a rolling hour and short waits usually clear it.
+      - name: Configure Pages (attempt 1)
+        id: pages_try1
+        uses: actions/configure-pages@v5
+        continue-on-error: true
+      - name: Wait before retry
+        if: steps.pages_try1.outcome == 'failure'
+        run: sleep 45
+      - name: Configure Pages (attempt 2)
+        id: pages_try2
+        if: steps.pages_try1.outcome == 'failure'
+        uses: actions/configure-pages@v5
+        continue-on-error: true
+      - name: Wait before final retry
+        if: steps.pages_try1.outcome == 'failure' && steps.pages_try2.outcome == 'failure'
+        run: sleep 120
+      - name: Configure Pages (attempt 3)
+        if: steps.pages_try1.outcome == 'failure' && steps.pages_try2.outcome == 'failure'
+        uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
