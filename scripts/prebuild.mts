@@ -170,11 +170,29 @@ export type FsHooks = {
   listDir: (path: string) => string[];
 };
 
-export const defaultGh: GhFn = (args) =>
-  execFileSync("gh", args, {
-    encoding: "utf-8",
-    maxBuffer: 64 * 1024 * 1024,
-  });
+export const defaultGh: GhFn = (args) => {
+  const delays = [5000, 15000, 30000];
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return execFileSync("gh", args, {
+        encoding: "utf-8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt < delays.length) {
+        const delay = delays[attempt];
+        console.error(
+          `gh api failed (attempt ${attempt + 1}/${delays.length + 1}), retrying in ${delay / 1000}s: ${(err as Error).message?.split("\n")[0]}`,
+        );
+        // Synchronous sleep via Atomics — no async plumbing needed here.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+      }
+    }
+  }
+  throw lastErr;
+};
 
 /**
  * Asset-byte fetcher, split off `GhFn` so the runtime can bypass the
