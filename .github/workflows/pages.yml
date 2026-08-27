@@ -14,9 +14,14 @@ permissions:
   pages: write
   id-token: write
 
+# Queue rather than cancel. The build job produces the whole data set, so a
+# cancelled run wastes its downloads and leaves the site on stale data — as
+# happened when merging #15 killed #14's run 38 minutes into its build. Now
+# that batched asset fetches put the build in the ~13 minute range, waiting is
+# cheaper than discarding work.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -50,6 +55,11 @@ jobs:
       - run: npm run build
         env:
           GH_TOKEN: ${{ github.token }}
+      # Re-run the suite now that `dist/` exists. The `test` job above runs
+      # without a bundle, so tests/bundle.test.ts skips itself there — this is
+      # the step that actually enforces the no-runtime-cross-origin-fetch
+      # invariant on main and on the nightly. Costs ~2s.
+      - run: npm test
       # `actions/configure-pages@v5` was dropped: its only job was to fetch
       # Pages site config via the API, and it was tripping on the same rate
       # limit (runs 28698970626 / 28733698722). We don't consume any of its

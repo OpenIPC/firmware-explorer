@@ -11,6 +11,7 @@ A static, single-page React explorer for OpenIPC firmware build composition — 
 ```bash
 npm run dev          # vite dev server at http://localhost:5173/firmware-explorer/
 npm run build        # prebuild (downloads data via gh) → tsc -b → vite build → dist/
+npm run build:app    # tsc -b → vite build only — no prebuild, no gh, no token
 npm test             # vitest run — full suite; 3 live tests skip unless RUN_LIVE_TESTS=1
 npm run test:watch   # vitest in watch mode
 npm run prebuild     # data aggregator only (tsx scripts/prebuild.mts)
@@ -29,7 +30,8 @@ The source data lives in GitHub release assets on `OpenIPC/firmware` and `OpenIP
 
 Consequences when editing:
 - Every runtime fetch URL is a relative `./data/...` path. The helpers `indexUrl`/`sizesUrl`/`kconfigGraphUrl`/`kconfigHelpUrl` (in `src/lib/`) are the only places that build these — keep them relative. Never introduce a `fetch()` of a `github.com`, `api.github.com`, or `releases/download/...` URL in `src/`.
-- `tests/bundle.test.ts` enforces this by grepping the **production JS bundle** for the killer URL patterns. It runs only when `dist/` exists, so it gates in CI (after `npm run build`) but is skipped on a bare `npm test`. If you add a new data type, add its same-origin invariant there too (as was done for kconfig and trends).
+- `tests/bundle.test.ts` enforces this by grepping the **production JS bundle** for the killer URL patterns. It skips itself when `dist/` is absent, so a bare `npm test` does not run it — you must build first. Both CI workflows therefore run `npm test` *after* a build: `ci.yml` on every PR (via `build:app`, no data needed) and `pages.yml` after the real build. Order matters — a `npm test` that runs before the build silently drops this invariant, which is how it went unenforced in CI until 2026-08-27. If you add a new data type, add its same-origin invariant there too (as was done for kconfig and trends).
+- Two footguns when checking this locally: a **stale** `dist/` makes the test validate an old bundle, and `tsc -b && vite build` short-circuits on a type error leaving the previous `dist/` in place. Always `rm -rf dist` and watch the build output before trusting a pass.
 
 ## Data flow
 
@@ -63,4 +65,6 @@ App.tsx  fetchIndex → fetchPlatformSizes → render tabs
 
 ## Deployment
 
-`.github/workflows/pages.yml`: `test` job (`npm ci && npm test`) is a hard gate; `build` job runs the prebuild with the workflow's `GH_TOKEN`; `deploy` publishes `dist/`. Triggers: push to `main`, nightly cron 04:30 UTC, manual dispatch. Requires Node 20+.
+`.github/workflows/pages.yml`: `test` job (`npm ci && npm test`) is a hard gate; `build` job runs the prebuild with the workflow's `GH_TOKEN`, then re-runs `npm test` so the bundle invariant is checked against the real `dist/`; `deploy` publishes it. Triggers: push to `main`, nightly cron 04:30 UTC, manual dispatch. Requires Node 20+. Concurrency is `group: pages, cancel-in-progress: false` — runs **queue** rather than cancel, because the build produces the whole data set and a cancelled run discards its downloads for nothing.
+
+`.github/workflows/ci.yml`: pull requests only. One `verify` job: `npm ci` → `npm run build:app` → `npm test`. It deliberately skips the prebuild — no `gh`, no token, no API calls, no downloads, ~2s of build — because the prebuild's logic is covered by the mocked unit tests and `tests/live.test.ts` (`RUN_LIVE_TESTS=1`). Concurrency is per-ref and the token is read-only, so a PR can neither cancel a deploy nor perform one.

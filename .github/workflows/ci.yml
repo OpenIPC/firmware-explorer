@@ -1,0 +1,41 @@
+name: CI
+
+# Pull requests only. Pushes to `main` are covered by pages.yml, and listing
+# `push` here as well would double up every run while a PR is open.
+on:
+  pull_request:
+
+# Per-ref, unlike pages.yml's repo-wide `pages` group. A PR must never be able
+# to cancel an in-flight deploy — merging #15 killed #14's build 38 minutes in
+# precisely because they shared a group.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default read-only token. No `pages: write` / `id-token: write` here, so a PR
+# run structurally cannot deploy, and fork PRs work unchanged.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      # App-only build: `build:app` has no `prebuild` lifecycle hook, so this
+      # runs `tsc -b && vite build` with no `gh` CLI, no GH_TOKEN, no asset
+      # downloads and no API calls — ~2s. The prebuild is deliberately out of
+      # scope for PR CI: it is slow, needs a token, and its logic is already
+      # covered by the mocked unit tests (plus tests/live.test.ts under
+      # RUN_LIVE_TESTS=1).
+      - run: npm run build:app
+      # Must come AFTER the build. tests/bundle.test.ts skips itself when
+      # `dist/` is absent, so running the suite first would silently drop the
+      # no-runtime-cross-origin-fetch invariant — which is exactly how it came
+      # to be unenforced anywhere in CI.
+      - run: npm test
