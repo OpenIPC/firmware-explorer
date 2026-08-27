@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   fetchReleases,
   MAX_RELEASES,
@@ -221,7 +221,9 @@ describe("fetchReleases", () => {
 
   function fakeRows(n: number): ReleaseApiRowLike[] {
     return Array.from({ length: n }, (_, i) => {
-      const tag = `nightly-2026060${(i % 9) + 1}-abcdef${i.toString(16).slice(-1)}`;
+      // Tags must be unique: `detail` is keyed by tag, so a generator that
+      // recycles names would silently under-count and mask a truncation bug.
+      const tag = `nightly-2026060${(i % 9) + 1}-${i.toString(16).padStart(7, "0")}`;
       return {
         tag_name: tag,
         created_at: `2026-07-0${(i % 9) + 1}T00:00:00Z`,
@@ -276,16 +278,33 @@ describe("fetchReleases", () => {
     expect(calls).toEqual(["20/1"]);
   });
 
-  it("respects the MAX_RELEASES ceiling regardless of page size", () => {
+  it("respects the MAX_RELEASES ceiling when it divides the page size", () => {
     const calls: string[] = [];
-    // Every page is full, so only the page ceiling can stop the walk.
-    const { list } = fetchReleases(
+    // Every page is full, so only the ceiling can stop the walk.
+    const { list, detail } = fetchReleases(
       pagingGh(fakeRows(MAX_RELEASES + 200), calls),
       "OpenIPC/firmware",
       [20],
     );
     expect(calls).toHaveLength(MAX_RELEASES / 20);
     expect(list).toHaveLength(MAX_RELEASES);
+    expect(detail.size).toBe(MAX_RELEASES);
+  });
+
+  it("does not overshoot MAX_RELEASES on a page size that doesn't divide it", () => {
+    // 500 / 30 is not whole: the last page lands mid-way through, and the
+    // ceiling has to be applied per row or it overshoots to 510.
+    const calls: string[] = [];
+    const { list, detail } = fetchReleases(
+      pagingGh(fakeRows(MAX_RELEASES + 200), calls),
+      "OpenIPC/firmware",
+      [30],
+    );
+    expect(list).toHaveLength(MAX_RELEASES);
+    // detail is keyed by tag, so it must be truncated in step with list —
+    // not left carrying the extra rows from the final partial page.
+    expect(detail.size).toBe(MAX_RELEASES);
+    expect(calls).toHaveLength(Math.ceil(MAX_RELEASES / 30));
   });
 
   it("degrades to a smaller page size when a rung times out", () => {
@@ -323,6 +342,27 @@ describe("fetchReleases", () => {
     expect(() => fetchReleases(gh, "OpenIPC/firmware", [20, 10, 5])).toThrow(
       /504/,
     );
+  });
+
+  it("does not promise a further retry on the final rung", () => {
+    // These lines are what an on-call reader sees during an outage, so the
+    // last rung must not claim a smaller page size is still coming.
+    const logged: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((m: unknown) => void logged.push(String(m)));
+    try {
+      const gh: GhFn = () => {
+        throw new Error("gh: ... (HTTP 504)");
+      };
+      expect(() => fetchReleases(gh, "OpenIPC/firmware", [20, 10])).toThrow();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(logged).toHaveLength(2);
+    expect(logged[0]).toContain("retrying enumeration at per_page=10");
+    expect(logged[1]).toContain("no smaller page size left to try");
+    expect(logged[1]).not.toContain("retrying");
   });
 });
 

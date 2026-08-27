@@ -92,7 +92,11 @@ type ReleaseApiRow = {
  */
 export const RELEASE_PAGE_SIZES = [20, 10, 5] as const;
 
-/** Upper bound on releases enumerated per source, independent of page size. */
+/**
+ * Hard ceiling on releases enumerated per source — a runaway-pagination
+ * backstop, enforced exactly rather than rounded up to a page boundary so it
+ * holds for page sizes that don't divide it evenly.
+ */
 export const MAX_RELEASES = 500;
 
 /**
@@ -116,6 +120,15 @@ export const MAX_RELEASES = 500;
  * creeping up, degrade to smaller pages if a rung ever times out anyway.
  * A page size change shifts every page boundary, so a lower rung restarts the
  * enumeration from page 1 rather than trying to resume mid-stream.
+ *
+ * The degradation catch is deliberately unconditional rather than gated on a
+ * 504/stream-reset signature. We have already seen this one root cause surface
+ * under two unrelated-looking error texts, and the payload only keeps growing,
+ * so any pattern match is a guess about how the next variant will read. The
+ * trade is asymmetric: mis-classifying a size failure as permanent returns us
+ * to a wholly broken nightly, while retrying a genuinely permanent failure
+ * (bad auth, missing repo) costs a couple of wasted minutes in a job that was
+ * going to fail regardless. We pay the minutes.
  */
 export function fetchReleases(
   gh: GhFn,
@@ -123,14 +136,18 @@ export function fetchReleases(
   pageSizes: readonly number[] = RELEASE_PAGE_SIZES,
 ): { list: GhRelease[]; detail: Map<string, GhReleaseDetail> } {
   let lastErr: unknown;
-  for (const perPage of pageSizes) {
+  for (let i = 0; i < pageSizes.length; i++) {
+    const perPage = pageSizes[i];
     try {
       return enumerateReleases(gh, repo, perPage);
     } catch (err) {
       lastErr = err;
+      const next = pageSizes[i + 1];
       console.error(
-        `[${repo}] /releases?per_page=${perPage} failed (${(err as Error).message?.split("\n")[0]}); ` +
-          `retrying enumeration at a smaller page size`,
+        `[${repo}] /releases?per_page=${perPage} failed (${(err as Error).message?.split("\n")[0]})` +
+          (next === undefined
+            ? `; no smaller page size left to try`
+            : `; retrying enumeration at per_page=${next}`),
       );
     }
   }
@@ -138,9 +155,10 @@ export function fetchReleases(
 }
 
 /**
- * One full enumeration pass at a fixed page size. Stops early on the first
- * partial page (< perPage rows) since GitHub returns releases in strict
- * newest-first order.
+ * One full enumeration pass at a fixed page size. Stops on the first partial
+ * page (< perPage rows), since GitHub returns releases in strict newest-first
+ * order, or on the MAX_RELEASES ceiling — which is applied per row, not per
+ * page, so a page size that doesn't divide the ceiling can't overshoot it.
  */
 function enumerateReleases(
   gh: GhFn,
@@ -151,6 +169,7 @@ function enumerateReleases(
   const list: GhRelease[] = [];
   const detail = new Map<string, GhReleaseDetail>();
   for (let page = 1; page <= maxPages; page++) {
+    if (list.length >= MAX_RELEASES) break;
     const raw = gh([
       "api",
       "-H",
@@ -159,6 +178,7 @@ function enumerateReleases(
     ]);
     const rows = JSON.parse(raw) as ReleaseApiRow[];
     for (const row of rows) {
+      if (list.length >= MAX_RELEASES) break;
       list.push({
         tagName: row.tag_name,
         createdAt: row.created_at,
