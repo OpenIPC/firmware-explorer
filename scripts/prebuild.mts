@@ -87,19 +87,67 @@ type ReleaseApiRow = {
 };
 
 /**
+ * Page sizes tried in order by fetchReleases, largest first. See its doc
+ * comment for why the API's `per_page=100` cap is off the table.
+ */
+export const RELEASE_PAGE_SIZES = [20, 10, 5] as const;
+
+/** Upper bound on releases enumerated per source, independent of page size. */
+export const MAX_RELEASES = 500;
+
+/**
  * Paginated `gh api /repos/:owner/:repo/releases`. Returns every release with
  * its full metadata + asset list + download URLs in one place, replacing the
  * old `gh release list` + per-tag `gh release view` pattern that cost ~91
  * API calls per source.
  *
- * `per_page=100` is the API's cap. We stop early on the first partial page
- * (< 100 rows) since GitHub returns them in strict newest-first order.
+ * We deliberately do NOT use the API's `per_page=100` cap. This endpoint
+ * embeds each release's *entire* asset array inline, and OpenIPC nightlies
+ * carry ~400 assets apiece — so a 100-release page is ~40k asset objects and
+ * >50 MB of JSON, which GitHub's gateway cannot render inside its ~10s budget.
+ * It answers HTTP 504, or begins streaming and then resets the HTTP/2 stream
+ * mid-body (`stream error: stream ID 1; CANCEL; received from peer`), leaving
+ * a truncated payload and a non-zero exit. That is a *deterministic* failure,
+ * not a transient one, so the `defaultGh` retry ladder cannot clear it — it
+ * broke run 33087500142 on both sources. Measured against OpenIPC/firmware:
+ * per_page=100 → 504 · 50 → 11.0s/29 MB · 30 → 7.7s/20 MB · 20 → 4.7s/13 MB.
+ *
+ * So we page at 20 (roughly 2x headroom) and, because asset counts keep
+ * creeping up, degrade to smaller pages if a rung ever times out anyway.
+ * A page size change shifts every page boundary, so a lower rung restarts the
+ * enumeration from page 1 rather than trying to resume mid-stream.
  */
 export function fetchReleases(
   gh: GhFn,
   repo: string,
-  maxPages = 5,
+  pageSizes: readonly number[] = RELEASE_PAGE_SIZES,
 ): { list: GhRelease[]; detail: Map<string, GhReleaseDetail> } {
+  let lastErr: unknown;
+  for (const perPage of pageSizes) {
+    try {
+      return enumerateReleases(gh, repo, perPage);
+    } catch (err) {
+      lastErr = err;
+      console.error(
+        `[${repo}] /releases?per_page=${perPage} failed (${(err as Error).message?.split("\n")[0]}); ` +
+          `retrying enumeration at a smaller page size`,
+      );
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * One full enumeration pass at a fixed page size. Stops early on the first
+ * partial page (< perPage rows) since GitHub returns releases in strict
+ * newest-first order.
+ */
+function enumerateReleases(
+  gh: GhFn,
+  repo: string,
+  perPage: number,
+): { list: GhRelease[]; detail: Map<string, GhReleaseDetail> } {
+  const maxPages = Math.ceil(MAX_RELEASES / perPage);
   const list: GhRelease[] = [];
   const detail = new Map<string, GhReleaseDetail>();
   for (let page = 1; page <= maxPages; page++) {
@@ -107,7 +155,7 @@ export function fetchReleases(
       "api",
       "-H",
       "Accept: application/vnd.github+json",
-      `/repos/${repo}/releases?per_page=100&page=${page}`,
+      `/repos/${repo}/releases?per_page=${perPage}&page=${page}`,
     ]);
     const rows = JSON.parse(raw) as ReleaseApiRow[];
     for (const row of rows) {
@@ -127,7 +175,7 @@ export function fetchReleases(
         })),
       });
     }
-    if (rows.length < 100) break;
+    if (rows.length < perPage) break;
   }
   return { list, detail };
 }
@@ -305,10 +353,11 @@ export async function runPrebuild(opts: RunOpts): Promise<{
   for (const source of sources) {
     const repo = REPOS[source];
     log(`[${source}] enumerating releases from ${repo}`);
-    // Single paginated `gh api /releases` call yields every release with its
+    // One paginated `gh api /releases` walk yields every release with its
     // metadata + asset URLs. Replaces the old `release list` (1 call) plus
     // per-tag `release view` (~retention calls) — cuts enumeration cost from
-    // ~91 to 1-2 API calls per source.
+    // ~91 to a handful of API calls per source. See fetchReleases for why the
+    // page size is well below the API's per_page=100 cap.
     const { list, detail: details } = fetchReleases(gh, repo);
     const nightlies = list
       .filter((r) => TAG_RE.test(r.tagName))

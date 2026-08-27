@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   fetchReleases,
+  MAX_RELEASES,
   parseBody,
   platformFromAssetName,
   runPrebuild,
@@ -150,10 +151,14 @@ function makeGh(releases: FakeRelease[]): GhFn {
       const repo = repoMatch[1];
       const pageMatch = /[?&]page=(\d+)/.exec(path);
       const page = pageMatch ? parseInt(pageMatch[1], 10) : 1;
-      // 100 per page; fakes fit in one page.
-      if (page > 1) return "[]";
+      const perPageMatch = /[?&]per_page=(\d+)/.exec(path);
+      if (!perPageMatch) throw new Error(`gh api path lacks per_page: ${path}`);
+      const perPage = parseInt(perPageMatch[1], 10);
+      // Slice like the real endpoint so the caller's partial-page stop
+      // condition is exercised at whatever page size it asked for.
+      const slice = releases.slice((page - 1) * perPage, page * perPage);
       return JSON.stringify(
-        releases.map((r) => ({
+        slice.map((r) => ({
           tag_name: r.tagName,
           created_at: r.createdAt,
           prerelease: r.isPrerelease,
@@ -192,74 +197,132 @@ function makeHttp(fs: FsHooks, releases: FakeRelease[]): HttpFn {
 // ---------------------------------------------------------------------------
 
 describe("fetchReleases", () => {
-  it("caps at one API call per 100 releases and returns full detail", () => {
-    const rows = Array.from({ length: 42 }, (_, i) => ({
-      tagName: `nightly-2026060${(i % 9) + 1}-abcdef${i.toString(16).padStart(1, "0")}`,
-      createdAt: `2026-07-0${(i % 9) + 1}T00:00:00Z`,
-      isPrerelease: true,
-      body: `sha=fake${i}\n`,
-      assets: [{ name: `sizes.p${i}-lite.json`, size: 1000 + i }],
-    }));
-    let calls = 0;
-    const gh: GhFn = (args) => {
-      calls++;
-      // Assert we're using /releases and not the old subcommands.
+  // Build a mock that slices like the real endpoint, and records the
+  // per_page/page pairs it was asked for.
+  function pagingGh(rows: ReleaseApiRowLike[], calls: string[]): GhFn {
+    return (args) => {
       expect(args[0]).toBe("api");
       const path = args.find((a) => a.startsWith("/repos/"))!;
       expect(path).toContain("/releases");
-      expect(path).toContain("per_page=100");
-      return JSON.stringify(
-        rows.map((r) => ({
-          tag_name: r.tagName,
-          created_at: r.createdAt,
-          prerelease: r.isPrerelease,
-          body: r.body,
-          assets: r.assets.map((a) => ({
-            name: a.name,
-            size: a.size,
-            browser_download_url: `https://github.com/OpenIPC/firmware/releases/download/${r.tagName}/${a.name}`,
-          })),
-        })),
-      );
+      const perPage = parseInt(/[?&]per_page=(\d+)/.exec(path)![1], 10);
+      const page = parseInt(/[?&]page=(\d+)/.exec(path)![1], 10);
+      calls.push(`${perPage}/${page}`);
+      return JSON.stringify(rows.slice((page - 1) * perPage, page * perPage));
     };
-    const { list, detail } = fetchReleases(gh, "OpenIPC/firmware");
-    // 42 releases fit in one page — stops early on partial page.
-    expect(calls).toBe(1);
+  }
+
+  type ReleaseApiRowLike = {
+    tag_name: string;
+    created_at: string;
+    prerelease: boolean;
+    body: string;
+    assets: Array<{ name: string; size: number; browser_download_url: string }>;
+  };
+
+  function fakeRows(n: number): ReleaseApiRowLike[] {
+    return Array.from({ length: n }, (_, i) => {
+      const tag = `nightly-2026060${(i % 9) + 1}-abcdef${i.toString(16).slice(-1)}`;
+      return {
+        tag_name: tag,
+        created_at: `2026-07-0${(i % 9) + 1}T00:00:00Z`,
+        prerelease: true,
+        body: `sha=fake${i}\n`,
+        assets: [
+          {
+            name: `sizes.p${i}-lite.json`,
+            size: 1000 + i,
+            browser_download_url: `https://github.com/OpenIPC/firmware/releases/download/${tag}/sizes.p${i}-lite.json`,
+          },
+        ],
+      };
+    });
+  }
+
+  it("pages well under the API's per_page cap and returns full detail", () => {
+    const rows = fakeRows(42);
+    const calls: string[] = [];
+    const { list, detail } = fetchReleases(
+      pagingGh(rows, calls),
+      "OpenIPC/firmware",
+    );
+    // The 100-release page is what blew up run 33087500142: ~400 assets per
+    // nightly makes it too big for GitHub's gateway to render in time. Never
+    // ask for it again.
+    expect(calls.every((c) => parseInt(c.split("/")[0], 10) <= 20)).toBe(true);
     expect(list).toHaveLength(42);
     expect(detail.size).toBe(42);
-    const first = detail.get(rows[0].tagName)!;
+    const first = detail.get(rows[0].tag_name)!;
     expect(first.body).toBe(rows[0].body);
-    expect(first.assets[0].downloadUrl).toContain("browser_download_url".slice(0, 0)); // downloadUrl populated
     expect(first.assets[0].downloadUrl).toContain(
-      `/releases/download/${rows[0].tagName}/${rows[0].assets[0].name}`,
+      `/releases/download/${rows[0].tag_name}/${rows[0].assets[0].name}`,
     );
   });
 
-  it("paginates when the API returns a full page", () => {
-    // 100 rows on page 1 → advance to page 2. Page 2 returns 5 → stop.
-    const page1 = Array.from({ length: 100 }, (_, i) => ({
-      tag_name: `t${i}`,
-      created_at: "2026-06-01T00:00:00Z",
-      prerelease: true,
-      body: "",
-      assets: [],
-    }));
-    const page2 = Array.from({ length: 5 }, (_, i) => ({
-      tag_name: `late-t${i}`,
-      created_at: "2026-05-30T00:00:00Z",
-      prerelease: true,
-      body: "",
-      assets: [],
-    }));
+  it("paginates until it sees a partial page", () => {
+    // 45 rows at per_page=20 → pages of 20, 20, 5; the 5 stops it.
+    const calls: string[] = [];
+    const { list } = fetchReleases(
+      pagingGh(fakeRows(45), calls),
+      "OpenIPC/firmware",
+      [20],
+    );
+    expect(list).toHaveLength(45);
+    expect(calls).toEqual(["20/1", "20/2", "20/3"]);
+  });
+
+  it("stops early when the first page is partial", () => {
+    const calls: string[] = [];
+    fetchReleases(pagingGh(fakeRows(7), calls), "OpenIPC/firmware", [20]);
+    expect(calls).toEqual(["20/1"]);
+  });
+
+  it("respects the MAX_RELEASES ceiling regardless of page size", () => {
+    const calls: string[] = [];
+    // Every page is full, so only the page ceiling can stop the walk.
+    const { list } = fetchReleases(
+      pagingGh(fakeRows(MAX_RELEASES + 200), calls),
+      "OpenIPC/firmware",
+      [20],
+    );
+    expect(calls).toHaveLength(MAX_RELEASES / 20);
+    expect(list).toHaveLength(MAX_RELEASES);
+  });
+
+  it("degrades to a smaller page size when a rung times out", () => {
+    // Reproduces the run 33087500142 shape: the big page 504s, the small one
+    // succeeds. The retry must restart at page 1 — a page size change moves
+    // every boundary, so resuming mid-stream would skip or duplicate rows.
+    const rows = fakeRows(30);
+    const calls: string[] = [];
     const gh: GhFn = (args) => {
       const path = args.find((a) => a.startsWith("/repos/"))!;
-      const page = /[?&]page=(\d+)/.exec(path)?.[1] ?? "1";
-      if (page === "1") return JSON.stringify(page1);
-      if (page === "2") return JSON.stringify(page2);
-      return "[]";
+      const perPage = parseInt(/[?&]per_page=(\d+)/.exec(path)![1], 10);
+      const page = parseInt(/[?&]page=(\d+)/.exec(path)![1], 10);
+      calls.push(`${perPage}/${page}`);
+      if (perPage > 10) {
+        throw new Error(
+          "gh: We couldn't respond to your request in time. (HTTP 504)",
+        );
+      }
+      return JSON.stringify(rows.slice((page - 1) * perPage, page * perPage));
     };
-    const { list } = fetchReleases(gh, "OpenIPC/firmware");
-    expect(list).toHaveLength(105);
+    const { list, detail } = fetchReleases(gh, "OpenIPC/firmware", [20, 10]);
+    // 30 rows divides evenly by 10, so pages 1-3 are all full and it takes a
+    // 4th (empty) page to see the partial-page stop.
+    expect(calls).toEqual(["20/1", "10/1", "10/2", "10/3", "10/4"]);
+    expect(list).toHaveLength(30);
+    // No duplicates leaked in from the abandoned rung.
+    expect(detail.size).toBe(30);
+    expect(new Set(list.map((r) => r.tagName)).size).toBe(30);
+  });
+
+  it("rethrows the last error when every page size fails", () => {
+    const gh: GhFn = () => {
+      throw new Error("gh: ... (HTTP 504)");
+    };
+    expect(() => fetchReleases(gh, "OpenIPC/firmware", [20, 10, 5])).toThrow(
+      /504/,
+    );
   });
 });
 
