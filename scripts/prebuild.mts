@@ -271,28 +271,74 @@ export const defaultGh: GhFn = (args) => {
  * consecutive-cron failures (runs 28646280479 / 28698970626 /
  * 28733698722).
  *
- * `curl --retry 5 --retry-delay 5 --retry-connrefused` handles genuine
+ * `curl --retry 5 --retry-delay 5 --retry-all-errors` handles genuine
  * transient network failures (timeouts, DNS blips, CDN 5xx) natively
  * so we don't need our own retry loop layered on top.
+ *
+ * Production fetches through `HttpBatchFn` below; this single-asset shape
+ * remains as the injection seam unit tests mock against, and runPrebuild
+ * adapts it to the batch interface automatically.
  */
 export type HttpFn = (url: string, target: string) => void;
-export const defaultHttp: HttpFn = (url, target) =>
-  execFileSync(
-    "curl",
-    [
-      "-fsSL",
-      "--retry",
-      "5",
-      "--retry-delay",
-      "5",
-      "--retry-all-errors",
-      "-o",
-      target,
-      url,
-    ],
-    { encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 },
-  );
 
+/**
+ * Batched counterpart to HttpFn: fetch many assets in one go.
+ *
+ * A nightly carries ~100 `sizes.*.json` shards of ~34 KB each, and we walk
+ * ~146 tag/source pairs per run, so the download phase is ~15k fetches. Done
+ * as one `curl` process per asset it is dominated almost entirely by setup —
+ * process spawn, DNS, TLS handshake, and the 302 from github.com to
+ * objects.githubusercontent.com — not by transfer. Measured over one real
+ * 99-asset tag: 34.0s as one-shot-curl-per-asset, 3.8s batched into a single
+ * curl (connection reuse), 0.57s batched with `--parallel`. Byte-identical
+ * output all three ways. That is the difference between a ~50-80 minute
+ * nightly and a ~90 second one.
+ */
+export type HttpBatchFn = (
+  items: ReadonlyArray<{ url: string; target: string }>,
+) => void;
+
+/** Transfers per curl invocation — bounds argv length. */
+export const HTTP_BATCH_MAX = 128;
+
+/** Concurrent transfers within one invocation. Polite against the asset CDN. */
+export const HTTP_PARALLEL = 8;
+
+/**
+ * Fetches via anonymous HTTPS on `browser_download_url`, consuming none of the
+ * installation's API rate-limit bucket — see HttpFn above for why that matters.
+ */
+/** argv for one curl invocation. Split out so it can be asserted directly. */
+export function curlBatchArgs(
+  chunk: ReadonlyArray<{ url: string; target: string }>,
+): string[] {
+  const args = [
+    "-fsSL",
+    "--retry",
+    "5",
+    "--retry-delay",
+    "5",
+    "--retry-all-errors",
+    // Abort the whole batch on the first bad transfer, matching the fail-fast
+    // behaviour of the old one-asset-at-a-time loop. Callers discard the
+    // partial directory and re-fetch on the next run.
+    "--fail-early",
+    "--parallel",
+    "--parallel-max",
+    String(HTTP_PARALLEL),
+  ];
+  for (const it of chunk) args.push("-o", it.target, it.url);
+  return args;
+}
+
+export const defaultHttpBatch: HttpBatchFn = (items) => {
+  for (let i = 0; i < items.length; i += HTTP_BATCH_MAX) {
+    execFileSync("curl", curlBatchArgs(items.slice(i, i + HTTP_BATCH_MAX)), {
+      encoding: "utf-8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  }
+};
 export const defaultFs: FsHooks = {
   mkdir: (p) => mkdirSync(p, { recursive: true }),
   write: (p, c) => writeFileSync(p, c),
@@ -345,6 +391,7 @@ export type RunOpts = {
   cacheDir?: string;
   gh?: GhFn;
   http?: HttpFn;
+  httpBatch?: HttpBatchFn;
   fs?: FsHooks;
   sources?: readonly Source[];
   retention?: number;
@@ -357,7 +404,16 @@ export async function runPrebuild(opts: RunOpts): Promise<{
   builds: Record<Source, BuildEntry[]>;
 }> {
   const gh = opts.gh ?? defaultGh;
-  const http = opts.http ?? defaultHttp;
+  // A caller that injects only `http` (every existing unit test) still gets
+  // correct behaviour: batching degrades to a loop over its mock. Production,
+  // which injects neither, gets the batched fetcher.
+  const httpBatch =
+    opts.httpBatch ??
+    (opts.http
+      ? (items: ReadonlyArray<{ url: string; target: string }>) => {
+          for (const it of items) opts.http!(it.url, it.target);
+        }
+      : defaultHttpBatch);
   const fs = opts.fs ?? defaultFs;
   const sources = opts.sources ?? SOURCES;
   const retention = opts.retention ?? 90;
@@ -443,15 +499,25 @@ export async function runPrebuild(opts: RunOpts): Promise<{
         // download` path, which internally makes one API call per asset (~97
         // calls per tag × 90 tags = ~8700 API calls per source per run).
         try {
-          for (const asset of detail.assets) {
-            if (!SIZES_RE.test(asset.name)) continue;
+          const wanted = detail.assets.filter((a) => SIZES_RE.test(a.name));
+          for (const asset of wanted) {
             if (!asset.downloadUrl) {
               throw new Error(`no browser_download_url on ${asset.name}`);
             }
-            http(asset.downloadUrl, join(tagCache, asset.name));
           }
+          httpBatch(
+            wanted.map((a) => ({
+              url: a.downloadUrl!,
+              target: join(tagCache, a.name),
+            })),
+          );
         } catch (e) {
           log(`[${source}] ${tag} download failed: ${(e as Error).message}`);
+          // Drop the whole directory rather than leave it half-populated.
+          // Concurrent transfers can be cut off mid-write, so a survivor could
+          // be a truncated shard that still counts toward the completeness
+          // check below and would then be served as final.
+          fs.rmDir(tagCache);
           continue;
         }
       } else {
@@ -503,7 +569,7 @@ export async function runPrebuild(opts: RunOpts): Promise<{
       sourceOut,
       cacheDir,
       forceRefetch,
-      http,
+      httpBatch,
       fs,
       log,
     });
@@ -680,11 +746,11 @@ async function downloadKconfig(args: {
   sourceOut: string;
   cacheDir: string;
   forceRefetch: boolean;
-  http: HttpFn;
+  httpBatch: HttpBatchFn;
   fs: FsHooks;
   log: (msg: string) => void;
 }): Promise<string[]> {
-  const { builds, source, details, sourceOut, cacheDir, forceRefetch, http, fs, log } = args;
+  const { builds, source, details, sourceOut, cacheDir, forceRefetch, httpBatch, fs, log } = args;
   const kconfigOut = join(sourceOut, "kconfig");
 
   for (const build of builds) {
@@ -710,10 +776,16 @@ async function downloadKconfig(args: {
           if (!asset.downloadUrl) {
             throw new Error(`no browser_download_url on ${asset.name}`);
           }
-          http(asset.downloadUrl, join(kcCache, asset.name));
         }
+        httpBatch(
+          kconfigAssets.map((a) => ({
+            url: a.downloadUrl!,
+            target: join(kcCache, a.name),
+          })),
+        );
       } catch (e) {
         log(`[${source}] ${tag} kconfig download failed: ${(e as Error).message}`);
+        fs.rmDir(kcCache);
         continue;
       }
     }
