@@ -1,12 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  curlBatchArgs,
   fetchReleases,
+  HTTP_BATCH_MAX,
+  HTTP_PARALLEL,
   MAX_RELEASES,
   parseBody,
   platformFromAssetName,
   runPrebuild,
   type FsHooks,
   type GhFn,
+  type HttpBatchFn,
   type HttpFn,
 } from "../scripts/prebuild.mts";
 
@@ -366,38 +370,159 @@ describe("fetchReleases", () => {
   });
 });
 
+// Shared fixture: two nightlies (2 sizes shards + 1) plus a non-nightly tag.
+const releases: FakeRelease[] = [
+  {
+    tagName: "nightly-20260604-679c2c7",
+    createdAt: "2026-06-04T00:11:18Z",
+    isPrerelease: true,
+    body: "sha=679c2c7abcdef0\nshort=679c2c7\nbuilt_at=2026-06-04T00:11:18Z\n",
+    assets: [
+      { name: "sizes.hi3518ev300-lite.json", size: 30000 },
+      { name: "sizes.ssc335-ultimate.json", size: 25000 },
+      { name: "openipc.hi3518ev300-nor-lite.tgz", size: 7000000 },
+    ],
+  },
+  {
+    tagName: "nightly-20260603-aaaaaaa",
+    createdAt: "2026-06-03T00:11:18Z",
+    isPrerelease: true,
+    body: "sha=aaaaaaabbb\nshort=aaaaaaa\nbuilt_at=2026-06-03T00:11:18Z\n",
+    assets: [{ name: "sizes.hi3518ev300-lite.json", size: 29000 }],
+  },
+  {
+    tagName: "junk-not-nightly",
+    createdAt: "2026-06-04T01:00:00Z",
+    isPrerelease: false,
+    body: "",
+    assets: [],
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Batched asset download
+// ---------------------------------------------------------------------------
+
+describe("batched asset download", () => {
+  const item = (n: number) => ({
+    url: `https://github.com/o/r/releases/download/t/sizes.p${n}.json`,
+    target: `/cache/t/sizes.p${n}.json`,
+  });
+
+  it("pairs each -o with its url, in order", () => {
+    const args = curlBatchArgs([item(1), item(2)]);
+    expect(args.slice(-6)).toEqual([
+      "-o",
+      item(1).target,
+      item(1).url,
+      "-o",
+      item(2).target,
+      item(2).url,
+    ]);
+  });
+
+  it("asks curl for parallel transfers and fail-early", () => {
+    // These flags are the whole point: connection reuse plus concurrency took
+    // a real 99-asset tag from 34.0s to 0.57s. --fail-early preserves the
+    // fail-fast semantics of the old per-asset loop.
+    const args = curlBatchArgs([item(1)]);
+    expect(args).toContain("--parallel");
+    expect(args).toContain("--fail-early");
+    expect(args[args.indexOf("--parallel-max") + 1]).toBe(String(HTTP_PARALLEL));
+    // Still retrying transients natively rather than in our own loop.
+    expect(args).toContain("--retry-all-errors");
+  });
+
+  it("keeps a full chunk's argv well inside the OS limit", () => {
+    // HTTP_BATCH_MAX exists only to bound argv. If it ever stops doing that,
+    // curl fails with E2BIG at runtime and only in production.
+    const long = Array.from({ length: HTTP_BATCH_MAX }, (_, i) => ({
+      url: `https://github.com/OpenIPC/firmware/releases/download/nightly-20260827-1bceaac/sizes.${"x".repeat(40)}${i}.json`,
+      target: `/tmp/firmware-explorer-prebuild/firmware/nightly-20260827-1bceaac/sizes.${"x".repeat(40)}${i}.json`,
+    }));
+    const bytes = curlBatchArgs(long).reduce((n, a) => n + a.length + 1, 0);
+    expect(bytes).toBeLessThan(128 * 1024);
+  });
+
+  it("fetches a tag's shards in one batch, not one call per asset", async () => {
+    const { fs } = memFs();
+    const batches: number[] = [];
+    const httpBatch: HttpBatchFn = (items) => {
+      batches.push(items.length);
+      for (const it of items) fs.write(it.target, JSON.stringify({ schema: 1 }));
+    };
+    await runPrebuild({
+      outDir: "/out",
+      cacheDir: "/cache",
+      gh: makeGh(releases),
+      httpBatch,
+      fs,
+      sources: ["firmware"],
+      retention: 90,
+      log: () => {},
+    });
+    // Two nightlies: one with 2 sizes shards, one with 1. Non-sizes assets
+    // (the .tgz) must not be fetched.
+    expect(batches).toEqual([2, 1]);
+  });
+
+  it("still works for a caller that injects only the single-asset hook", async () => {
+    // Every pre-existing test drives runPrebuild this way, so the adapter
+    // from HttpFn to HttpBatchFn has to stay.
+    const { fs } = memFs();
+    const fetched: string[] = [];
+    const http: HttpFn = (url, target) => {
+      fetched.push(url);
+      fs.write(target, JSON.stringify({ schema: 1 }));
+    };
+    const result = await runPrebuild({
+      outDir: "/out",
+      cacheDir: "/cache",
+      gh: makeGh(releases),
+      http,
+      fs,
+      sources: ["firmware"],
+      retention: 90,
+      log: () => {},
+    });
+    expect(fetched).toHaveLength(3);
+    expect(fetched.every((u) => u.includes("/sizes."))).toBe(true);
+    expect(result.builds.firmware).toHaveLength(2);
+  });
+
+  it("discards the whole tag directory when a batch fails", async () => {
+    // Parallel transfers can be cut off mid-write, so a survivor may be a
+    // truncated shard. If it were left behind it would count toward the
+    // completeness check and be served as final.
+    const { fs, state } = memFs();
+    const httpBatch: HttpBatchFn = (items) => {
+      // Simulate curl --fail-early: some transfers landed, then it aborted.
+      fs.write(items[0].target, '{"schema":1,"truncated"');
+      throw new Error("curl: (22) The requested URL returned error: 500");
+    };
+    const result = await runPrebuild({
+      outDir: "/out",
+      cacheDir: "/cache",
+      gh: makeGh(releases),
+      httpBatch,
+      fs,
+      sources: ["firmware"],
+      retention: 90,
+      log: () => {},
+    });
+    expect(result.builds.firmware).toHaveLength(0);
+    const leftovers = [...state.files.keys()].filter((f) =>
+      f.startsWith("/cache/firmware/"),
+    );
+    expect(leftovers).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // runPrebuild integration test
 // ---------------------------------------------------------------------------
 
 describe("runPrebuild", () => {
-  const releases: FakeRelease[] = [
-    {
-      tagName: "nightly-20260604-679c2c7",
-      createdAt: "2026-06-04T00:11:18Z",
-      isPrerelease: true,
-      body: "sha=679c2c7abcdef0\nshort=679c2c7\nbuilt_at=2026-06-04T00:11:18Z\n",
-      assets: [
-        { name: "sizes.hi3518ev300-lite.json", size: 30000 },
-        { name: "sizes.ssc335-ultimate.json", size: 25000 },
-        { name: "openipc.hi3518ev300-nor-lite.tgz", size: 7000000 },
-      ],
-    },
-    {
-      tagName: "nightly-20260603-aaaaaaa",
-      createdAt: "2026-06-03T00:11:18Z",
-      isPrerelease: true,
-      body: "sha=aaaaaaabbb\nshort=aaaaaaa\nbuilt_at=2026-06-03T00:11:18Z\n",
-      assets: [{ name: "sizes.hi3518ev300-lite.json", size: 29000 }],
-    },
-    {
-      tagName: "junk-not-nightly",
-      createdAt: "2026-06-04T01:00:00Z",
-      isPrerelease: false,
-      body: "",
-      assets: [],
-    },
-  ];
 
   it("walks one source, filters non-nightly tags, emits index + shards", async () => {
     const { fs, state } = memFs();
