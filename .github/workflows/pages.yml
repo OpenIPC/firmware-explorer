@@ -1,12 +1,12 @@
 name: Deploy to GitHub Pages
 
+# The explorer moved to https://openipc.org/firmware-explorer, where OpenIPC's
+# build CI pushes each build once (OpenIPC/website#311). This site is only a
+# redirect now: every address, including old deep links, lands on the new page
+# with its query string.
 on:
   push:
     branches: [main]
-  schedule:
-    # 04:30 UTC daily, well after firmware (00:11) and builder (~07:20)
-    # nightlies have settled. Cron format: minute hour dom month dow.
-    - cron: "30 4 * * *"
   workflow_dispatch:
 
 permissions:
@@ -14,67 +14,20 @@ permissions:
   pages: write
   id-token: write
 
-# Queue rather than cancel. The build job produces the whole data set, so a
-# cancelled run wastes its downloads and leaves the site on stale data — as
-# happened when merging #15 killed #14's run 38 minutes into its build. Now
-# that batched asset fetches put the build in the ~13 minute range, waiting is
-# cheaper than discarding work.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-      - run: npm ci
-      - run: npm test
-
-  build:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-      - run: npm ci
-      # `npm run build` invokes `npm run prebuild` first. Prebuild enumerates
-      # releases with ONE paginated `gh api /releases` call per source and
-      # fetches asset bytes via anonymous HTTPS on the browser_download_url —
-      # both to slash our footprint against the installation-wide API rate
-      # limit, which was blowing up consecutive nightly deploys in the busy
-      # 07:20–07:50 UTC cron window (runs 28646280479 / 28698970626 /
-      # 28733698722). See scripts/prebuild.mts.
-      - run: npm run build
-        env:
-          GH_TOKEN: ${{ github.token }}
-      # Re-run the suite now that `dist/` exists. The `test` job above runs
-      # without a bundle, so tests/bundle.test.ts skips itself there — this is
-      # the step that actually enforces the no-runtime-cross-origin-fetch
-      # invariant on main and on the nightly. Costs ~2s.
-      - run: npm test
-      # `actions/configure-pages@v5` was dropped: its only job was to fetch
-      # Pages site config via the API, and it was tripping on the same rate
-      # limit (runs 28698970626 / 28733698722). We don't consume any of its
-      # outputs (Vite `base` is hardcoded), and `deploy-pages@v4` works
-      # without it as long as Pages is already enabled on the repo — which
-      # it is, configured to build via GitHub Actions.
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
   deploy:
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: redirect
       - id: deployment
         uses: actions/deploy-pages@v4

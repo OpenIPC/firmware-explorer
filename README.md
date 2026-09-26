@@ -1,5 +1,10 @@
 # firmware-explorer
 
+> **Moved.** The explorer now lives at <https://openipc.org/firmware-explorer>,
+> fed directly by OpenIPC's build CI (OpenIPC/website#311). This repository is
+> archived; its Pages site only redirects there.
+
+
 Per-build package + kernel-module composition viewer for OpenIPC firmware.
 
 Live: **https://openipc.github.io/firmware-explorer/**
